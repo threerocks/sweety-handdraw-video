@@ -222,6 +222,18 @@ class WebMotionTests(unittest.TestCase):
         edge = web_motion.render('sketch_shapes', {'shapes': [{'kind': 'rect', 'box': [0, 0, 200, 100]}]}, 200, 100, .3, cache, fps=10)
         self.assertTrue(edge['clipped'])
 
+    def test_a_long_line_settles_inside_its_own_time(self):
+        import web_motion
+        cache = Path(tempfile.mkdtemp())
+        # The v3 film bug: 10 words at 70 ms stagger + 900 ms need 1.5 s; in a 0.9 s layer the last words froze mid-blur.
+        for style in ('blur_up', 'mask_up', 'typewriter'):
+            line = web_motion.render('kinetic_title', {'text': '换心态 · 给眼睛和手 · 换合作方式 · 只审核心', 'style': style, 'size': 46},
+                                     1126, 74, .9, cache, fps=30)
+            frames = [np.asarray(Image.open(Path(line['directory']) / f'{index:05d}.png'))[..., 3].astype(int) for index in (line['frames'] - 2, line['frames'] - 1)]
+            self.assertEqual(np.abs(frames[1] - frames[0]).sum(), 0, style)   # nothing still moving when the layer is held
+            right = frames[1][:, 900:]
+            self.assertGreater((right > 200).sum(), 200, style)               # the last word is solid, not a blur
+
 
 if __name__ == '__main__':
     unittest.main()

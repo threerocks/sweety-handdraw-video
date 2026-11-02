@@ -22,7 +22,7 @@ LIBRARIES = ('vendor/anime.js', 'vendor/rough.js', 'vendor/rough-notation.js', '
 # Heavier libraries load only for the recipe that uses them (MathJax alone is 2 MB).
 RECIPE_LIBRARIES = {'physics': ('vendor/matter.js',), 'spin3d': ('vendor/zdog.js',), 'formula': ('vendor/mathjax-tex-svg.js',)}
 RECIPES = ('kinetic_title', 'rough_annotate', 'sketch_shapes', 'burst', 'number_ticker', 'callout', 'progress_ring', 'morph', 'rough_chart',
-           'map_route', 'physics', 'spin3d', 'formula', 'custom')
+           'map_route', 'physics', 'spin3d', 'formula', 'roadmap', 'table', 'flow', 'swimlane', 'checklist', 'cards', 'pulse', 'custom')
 # MathJax: typeset on request only, no menu, no file loads (the bundle already holds every TeX extension), self-contained SVG paths.
 MATHJAX_CONFIG = ('window.MathJax={loader:{load:[]},startup:{typeset:false},options:{enableMenu:false},'
                   'svg:{fontCache:"none"},tex:{packages:{"[+]":["color","cancel","boldsymbol"]}}};')

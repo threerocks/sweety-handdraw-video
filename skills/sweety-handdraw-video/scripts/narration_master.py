@@ -36,6 +36,11 @@ TAIL_QUIET_SECONDS = .03  # ...for this long
 TAIL_BURST_DB = -30.      # a sound this loud after that quiet is not speech we asked for (an artifact after the sentence)
 TAIL_LOUD_DB = -25.       # a chunk that still ends this loud, with no quiet after its last word, was cut off
 TAIL_KEEP_SECONDS = .12   # natural decay and breath kept after the last syllable
+MIN_SYLLABLE_SECONDS = .12  # a stop consonant's closure is shorter: no quiet inside this ends the last syllable
+ENGLISH_ATTEMPTS = 6      # seeds tried for a chunk whose English words an English ear must hear
+CHECKS_VERSION = 4        # 2: the audio actually kept is checked again (complete ending, audible English); 3: short English words exact;
+                          # 4: a recorded tail cut inside the last word fails even when recognition still "hears" the word
+INSIDE_WORD_SECONDS = .1  # a cut this far before the recognized end of the last word has cut the word itself
 FADE_OUT_SECONDS = .05    # shortest raised-cosine fade at a cut, so no edge lands on a sound
 FADE_IN_SECONDS = .01
 
@@ -44,8 +49,43 @@ def sha256(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def script_text(manifest):
+def say_map(manifest, beat=None):
+    """Display term -> spoken form: narration.say for the whole job, a beat's own say on top. Subtitles show the
+    term as written (Grok, 70万); the voice reads the spoken form (格罗克, 七十万) and ASR checks that."""
+    merged = {**((manifest.get('narration') or {}).get('say') or {}), **(((beat or {}).get('say')) or {})}
+    for key, value in merged.items():
+        if not isinstance(key, str) or not key.strip() or not isinstance(value, str) or not value.strip():
+            raise ValueError('narration.say / beat.say map written terms to nonempty spoken text')
+    return merged
+
+
+def say_pattern(mapping):
+    # Latin terms match whole words only (Amp is not the start of Ample); longest first (70万 before 70).
+    def term(key):
+        latin = key.isascii() and any(ch.isalpha() for ch in key)
+        body = f'(?i:{re.escape(key)})' if latin else re.escape(key)  # GROK, grok and Grok are one term
+        return ('(?<![A-Za-z])' if key[0].isascii() and key[0].isalpha() else '') + body + \
+               ('(?![A-Za-z])' if key[-1].isascii() and key[-1].isalpha() else '')
+    return re.compile('|'.join(term(key) for key in sorted(mapping, key=len, reverse=True)))
+
+
+def spoken_text(manifest, beat, text=None):
+    """What the voice reads for a beat (or a piece of its display text)."""
+    text = beat['text'] if text is None else text
+    mapping = say_map(manifest, beat)
+    folded = {key.lower(): value for key, value in mapping.items()}
+    return say_pattern(mapping).sub(lambda match: mapping.get(match.group(0), folded.get(match.group(0).lower(), match.group(0))), text) if mapping else text
+
+
+def display_text(manifest):
     return ''.join(beat['text'] for page in manifest['pages'] for beat in page['beats'])
+
+
+def script_text(manifest):
+    """The script a master is generated from: the display text, plus the spoken text when a say map changes it."""
+    shown = display_text(manifest)
+    said = ''.join(spoken_text(manifest, beat) for page in manifest['pages'] for beat in page['beats'])
+    return shown if said == shown else shown + '\n[say]\n' + said
 
 
 def generation_target(root, manifest):
@@ -56,7 +96,7 @@ def generation_target(root, manifest):
         raise ValueError('Generated narration master must stay inside the job')
     text = script_text(manifest)
     closing = manifest.get('ending', {}).get('closing_text')
-    if closing and not text.endswith(closing):
+    if closing and not display_text(manifest).endswith(closing):
         raise ValueError('Add the requested closing to the complete script before generating narration')
     return target, text
 
@@ -91,8 +131,9 @@ def narration_chunks(manifest, limit=MAX_CHUNK_CHARS):
     chunks = []
     for page_index, page in enumerate(manifest['pages']):
         for beat in page['beats']:
-            for part, text in enumerate(split_long(beat['text'], limit)):
-                unit = {'beat': beat['id'], 'page': page_index, 'text': text}
+            for part, shown in enumerate(split_long(beat['text'], limit)):
+                text = spoken_text(manifest, beat, shown)
+                unit = {'beat': beat['id'], 'page': page_index, 'text': text, **({'show': shown} if shown != text else {})}
                 last = chunks[-1] if chunks else None
                 if last and part == 0 and (last['text'][-1] not in SENTENCE_END or len(spoken(last['text'])) < MIN_CHUNK_CHARS):
                     last['text'] += text
@@ -151,7 +192,11 @@ def speech_tail(samples, words=None, rate=SAMPLE_RATE):
     count = len(levels)
     duration = len(samples) / rate
     if words:
-        anchor = float(words[-1]['start'])
+        # Not the last word's start: a syllable that opens on a stop (遍 b-, 他 t-, 个 g-) begins with a silent closure,
+        # and that quiet read as the end of speech cut the syllable off (the v3 film lost 遍 of 多试几遍). The quiet that
+        # ends speech comes after the word's first MIN_SYLLABLE_SECONDS, near where recognition says the word ends.
+        last = words[-1]
+        anchor = max(float(last['start']) + MIN_SYLLABLE_SECONDS, float(last.get('end', last['start'])) - .1)
     else:
         anchor = max(0., speech_span(samples, rate)[1] - .4)
     quiet = max(1, round(TAIL_QUIET_SECONDS / .01))
@@ -189,6 +234,17 @@ def finish_edges(samples, cut, speech_end, rate=SAMPLE_RATE):
     return samples
 
 
+def clips_last_word(tail, words):
+    """Why a tail cut cuts into the last recognized word, or None. Recognition of the kept audio cannot catch this: it
+    completes a familiar phrase from context (the v3 film's 多试几遍 cut 0.14 s into 遍 was still transcribed as 遍)."""
+    if not words or not tail or tail.get('cut') is None:
+        return None
+    last = words[-1]
+    if float(tail['cut']) < float(last.get('end', last['start'])) - INSIDE_WORD_SECONDS:
+        return f"the tail cut at {tail['cut']:.2f}s falls inside the last word {last.get('text', '')!r} ({last['start']:.2f}-{last['end']:.2f}s)"
+    return None
+
+
 def clean_edges(samples, words=None, rate=SAMPLE_RATE):
     """(samples ending cleanly after the last syllable, report); samples None when the chunk was cut off mid-sound."""
     cut, report = speech_tail(samples, words, rate)
@@ -197,10 +253,12 @@ def clean_edges(samples, words=None, rate=SAMPLE_RATE):
     return finish_edges(samples, cut, report['speech_end'], rate), report
 
 
-def check_chunk(samples, text, path, asr):
-    """Noise gate, speech rate and ASR coverage (asr: True = local ASR when installed, or a callable)."""
+def check_chunk(samples, text, path, asr, english=False):
+    """Noise gate, speech rate and ASR coverage (asr: True = local ASR when installed, or a callable). The last
+    characters must be heard too (end_slack 0): a lost final syllable is a CER of one in thirty and passed before.
+    english: also check that an English ear hears the line's English words (True = local recognizer, or a callable)."""
     from audio_gate import measure
-    from align import speech_span, spoken_syllables, covers, transcribe
+    from align import speech_span, spoken_syllables, covers, transcribe, english_heard
     start, end = speech_span(samples)
     rate = spoken_syllables(text) / max(.01, end - start)
     result = {'gate': measure(samples, path.name, short_clip=True), 'chars_per_second': round(rate, 2), 'rate_unit': 'syllables'}
@@ -209,20 +267,83 @@ def check_chunk(samples, text, path, asr):
         failures.append(f'speech rate {rate:.2f} syllables/s outside {SPEECH_RATE_RANGE}')
     words = (asr if callable(asr) else transcribe)(path) if asr else None
     if words:
-        result['asr'] = covers(text, words['text'])
+        result['asr'] = covers(text, words['text'], end_slack=0)
         result['words'] = words['words']
         if result['asr']['status'] != 'pass':
-            failures.append(f"ASR does not cover the text (CER {result['asr']['cer']})")
+            failures.append(f"ASR does not cover the text, ending included (CER {result['asr']['cer']}): {words['text'][-12:]!r}")
     else:
         result['asr'] = {'status': 'not_available' if asr else 'disabled'}
+    if english and asr:
+        heard = (english if callable(english) else english_heard)(path, text)
+        result['english'] = heard or {'status': 'not_available'}
+        if heard and heard['status'] != 'pass':
+            failures.append('an English ear does not hear: ' + ', '.join(item['word'] for item in heard['words'] if not item['heard']))
     return {**result, 'failures': failures, 'status': 'FAIL' if failures else 'PASS'}
 
 
-def generate_chunk(synthesize, chunk, path, seed, asr):
-    """synthesize(text, seed) -> (samples, rate) or (samples, rate, words) when the engine returns timestamps."""
-    from align import speech_span
+def verify_kept(path, text, asr, english=True):
+    """Check the audio that is actually kept (after the tail cut), not the take before it: ending and English."""
+    check = check_chunk(read_pcm(path), text, path, asr, english=english)
+    return {'checks_version': CHECKS_VERSION, 'status': check['status'], 'failures': check['failures'],
+            'asr': check.get('asr'), **({'english': check['english']} if 'english' in check else {})}
+
+
+def risky_terms(manifest):
+    """{term: the clause it is read in} for what the voice reads after the say map: English words (a Chinese voice
+    often says them so an English ear does not hear them) and Arabic numerals (the local VoxCPM2 does not normalize
+    digits; 70万 must be read from 七十万)."""
+    from align import english_words
+    terms = {}
+    for page in manifest['pages']:
+        for beat in page['beats']:
+            said = spoken_text(manifest, beat)
+            # The probe reads the whole sentence: a two-word clause is read slowly and trips the speech-rate gate.
+            for sentence in re.split(r'(?<=[。！？!?])', said):
+                for term in english_words(sentence) + re.findall(r'\d+(?:\.\d+)?%?', sentence):
+                    terms.setdefault(term, sentence.strip())
+    return terms
+
+
+def probe_terms(root, manifest, synthesize, asr=True, seeds=2, seed=2026):
+    """Voice every risky term in its own clause before the master: a failing chunk costs up to six seeds of several
+    minutes each (x-start talk), a clause costs seconds. Writes work/term-probe/report.json with advice."""
+    root = Path(root)
+    folder = root / 'work' / 'term-probe'
+    folder.mkdir(parents=True, exist_ok=True)
+    report = []
+    for number, (term, clause) in enumerate(risky_terms(manifest).items()):
+        if re.fullmatch(r'\d+(?:\.\d+)?%?', term):
+            report.append({'term': term, 'line': clause, 'status': 'needs_say',
+                           'advice': f'digits are read unreliably: narration.say {{"{term}": "<汉字读法>"}} (the subtitle keeps {term})'})
+            continue
+        takes = []
+        for attempt in range(seeds):
+            audio, rate, *_ = synthesize(clause, seed + attempt)
+            path = folder / f'{number:02d}-{attempt}.wav'
+            write_pcm(path, to_rate(audio, rate))
+            check = check_chunk(read_pcm(path), clause, path, asr, english=True)
+            # Only what the term decides counts here: recognition and the English ear (rate and noise belong to the master).
+            failures = [item for item in check['failures'] if item.startswith(('ASR does not cover', 'an English ear'))]
+            takes.append({'seed': seed + attempt, 'status': 'FAIL' if failures else 'PASS', 'failures': failures,
+                          'other_checks': [item for item in check['failures'] if item not in failures], 'file': path.name})
+        passed = sum(take['status'] == 'PASS' for take in takes)
+        entry_ = {'term': term, 'line': clause, 'passed': passed, 'of': seeds, 'takes': takes,
+                  'status': 'pass' if passed == seeds else 'risky' if passed else 'fail'}
+        if passed < seeds:
+            entry_['advice'] = f'narration.say {{"{term}": "<中文读法或中文词>"}}: the subtitle keeps {term}, the voice reads the Chinese'
+        report.append(entry_)
+    (folder / 'report.json').write_text(json.dumps({'terms': report}, ensure_ascii=False, indent=1))
+    return report
+
+
+def generate_chunk(synthesize, chunk, path, seed, asr, english=True):
+    """synthesize(text, seed) -> (samples, rate) or (samples, rate, words) when the engine returns timestamps.
+    A line with English words gets more seeds: whether the voice says "git" or "Amp" so an English ear hears it varies
+    from seed to seed (the v3 probe: the same text was heard in one seed and not in the next)."""
+    from align import speech_span, english_words
     attempts = []
-    for attempt in range(GENERATION_ATTEMPTS):
+    tries = ENGLISH_ATTEMPTS if english and asr and english_words(chunk['text']) else GENERATION_ATTEMPTS
+    for attempt in range(tries):
         audio, rate, *timestamps = synthesize(chunk['text'], seed + attempt)
         audio = to_rate(audio, rate)
         if not len(audio) or not np.isfinite(audio).all():
@@ -243,16 +364,27 @@ def generate_chunk(synthesize, chunk, path, seed, asr):
         if cleaned is None:
             check['failures'] = check['failures'] + [f"the chunk ends mid-sound ({tail['final_level_db']} dB): the last word is cut off"]
             check['status'] = 'FAIL'
+        elif clips_last_word(tail, check.get('words')):
+            check['failures'] = check['failures'] + [clips_last_word(tail, check.get('words'))]
+            check['status'] = 'FAIL'
         else:
             write_pcm(path, cleaned)
+            if check['status'] == 'PASS':
+                check['kept'] = verify_kept(path, chunk['text'], asr, english)
+                if check['kept']['status'] != 'PASS':
+                    check['failures'] = check['failures'] + ['after the tail cut: ' + failure for failure in check['kept']['failures']]
+                    check['status'] = 'FAIL'
         attempts.append({'seed': seed + attempt, **check})
         if check['status'] == 'PASS':
             return attempts
     path.unlink(missing_ok=True)
-    raise ValueError(f"Chunk failed {GENERATION_ATTEMPTS} attempts: {chunk['text'][:24]}... " + json.dumps([item['failures'] for item in attempts], ensure_ascii=False))
+    unheard = sorted({item['word'] for attempt in attempts for item in (attempt.get('kept') or {}).get('english', {}).get('words', []) if not item['heard']})
+    advice = (f" English never heard in {tries} seeds: {', '.join(unheard)}. This voice cannot say them: write a Chinese term (bug -> 问题)"
+              " or a transliteration (Thorsten Ball -> 托尔斯滕·鲍尔) in the script, or list the word with a reason in narration.english_exceptions.") if unheard else ''
+    raise ValueError(f"Chunk failed {tries} attempts: {chunk['text'][:24]}... " + json.dumps([item['failures'] for item in attempts], ensure_ascii=False) + advice)
 
 
-def chunk_alignment(layout, limit=None):
+def chunk_alignment(layout, limit=None, speak=None):
     """Beat ranges from chunk placement; caption cues inside each chunk from timestamps or pauses.
     limit (CJK characters per cue, caption_assets.cue_char_limit) packs clauses for the canvas; a clause longer than
     the limit splits at word-aware positions only when the chunk has character timestamps to time the pieces."""
@@ -261,9 +393,17 @@ def chunk_alignment(layout, limit=None):
     for chunk, offset, audio, words in layout:
         def cut(text):
             return caption_texts(text, limit, split_long=bool(words)) if limit else caption_texts(text)
-        texts = [(unit['beat'], text) for unit in chunk['units'] for text in cut(unit['text'])]
-        ranges, method = piece_ranges(audio, [text for _, text in texts], words)
-        for (beat, text), (left, right) in zip(texts, ranges):
+        texts = []
+        for unit in chunk['units']:
+            shown = unit.get('show', unit['text'])
+            pieces_ = cut(shown)
+            said = [speak(unit['beat'], piece) for piece in pieces_] if speak and 'show' in unit else pieces_
+            if ''.join(said) != unit['text']:
+                pieces_, said = [shown], [unit['text']]  # a say term straddles a cut: one cue for the unit, still timed by the voice
+            texts += [(unit['beat'], piece, spoken_piece) for piece, spoken_piece in zip(pieces_, said)]
+        # Pieces are timed on what the voice says, and shown as written.
+        ranges, method = piece_ranges(audio, [spoken_piece for _, _, spoken_piece in texts], words)
+        for (beat, text, _), (left, right) in zip(texts, ranges):
             captions.setdefault(beat, []).append((text, (offset + left, offset + right), method))
     return captions
 
@@ -282,6 +422,19 @@ def build_master(root, manifest, synthesize, identity, options=None):
     chunks = narration_chunks(manifest, int(options.get('max_chunk_chars', MAX_CHUNK_CHARS)))
     folder = target.with_name(target.stem + '-chunks')
     layout, records, master, cursor = [], [], [], 0
+    # Words the director accepts as the voice says them (narration.english_exceptions: {word: reason}).
+    exceptions = {word.lower() for word in (manifest.get('narration', {}).get('english_exceptions') or {})}
+
+    def english(path, line):
+        from align import english_heard
+        heard = english_heard(path, line)
+        if heard and exceptions:
+            for item in heard['words']:
+                if item['word'] in exceptions and not item['heard']:
+                    item.update(heard=True, exception=True)
+            heard['status'] = 'pass' if all(item['heard'] for item in heard['words']) else 'fail'
+        return heard
+
     for index, chunk in enumerate(chunks):
         path = folder / f'{index:03d}.wav'
         signature = hashlib.sha256(json.dumps({'identity': identity, 'text': chunk['text'], 'seed': seed}, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -290,9 +443,24 @@ def build_master(root, manifest, synthesize, identity, options=None):
         if not (path.is_file() and record.get('signature') == signature):
             if path.exists() and not record:
                 raise ValueError('Existing untracked chunk will not be overwritten: ' + str(path))
-            attempts = generate_chunk(synthesize, chunk, path, seed, asr)
+            attempts = generate_chunk(synthesize, chunk, path, seed, asr, english)
             record = {'signature': signature, 'index': index, 'text': chunk['text'], 'units': chunk['units'], 'join': chunk['join'],
-                      'attempts': attempts, 'sha256': sha256(path)}
+                      'attempts': attempts, 'sha256': sha256(path), 'checks_version': CHECKS_VERSION}
+            chunk_record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2))
+        elif asr and record.get('checks_version', 1) < CHECKS_VERSION:
+            # Made before the current checks: check it now, and make it again if its ending or English fails, or if the
+            # record shows its tail was cut inside the last word (the audio is already cut: no check of it can bring it back).
+            kept = verify_kept(path, chunk['text'], asr, english)
+            used = record['attempts'][-1]
+            clipped = clips_last_word(used.get('tail'), used.get('words'))
+            if kept['status'] != 'PASS' or clipped:
+                path.unlink()
+                attempts = generate_chunk(synthesize, chunk, path, seed, asr, english)
+                record = {'signature': signature, 'index': index, 'text': chunk['text'], 'units': chunk['units'], 'join': chunk['join'],
+                          'attempts': attempts, 'sha256': sha256(path), 'replaced': {'reason': kept['failures'] + ([clipped] if clipped else [])}}
+            else:
+                record['attempts'][-1]['kept'] = kept
+            record['checks_version'] = CHECKS_VERSION
             chunk_record_path.write_text(json.dumps(record, ensure_ascii=False, indent=2))
         audio = read_pcm(path)
         # Chunks made before the tail rule are cleaned here too: the master never inherits a hard cut or an after-sound.
@@ -314,9 +482,19 @@ def build_master(root, manifest, synthesize, identity, options=None):
     if gate['status'] != 'PASS':
         raise ValueError('Joined narration master failed the audio gate: ' + '; '.join(gate['failures']))
     write_pcm(target, samples)
-    from align import entry
+    from align import close_fluent_gaps, entry
     from caption_assets import cue_char_limit
-    captions, beats = chunk_alignment(layout, cue_char_limit(manifest)), []
+    by_id = {beat['id']: beat for page in manifest['pages'] for beat in page['beats']}
+    captions = chunk_alignment(layout, cue_char_limit(manifest), lambda beat_id, piece: spoken_text(manifest, by_id[beat_id], piece))
+    beats = []
+    # Each chunk found its pauses against its own loudness; on the joined master (the clock the caption sync gate
+    # measures) a gap the voice speaks straight through is closed, keeping every start where the words are.
+    order = [beat['id'] for page in manifest['pages'] for beat in page['beats']]
+    flat = close_fluent_gaps(samples, [item[1] for beat_id in order for item in captions[beat_id]])
+    cursor = 0
+    for beat_id in order:
+        captions[beat_id] = [(text, flat[cursor + index], method) for index, (text, _, method) in enumerate(captions[beat_id])]
+        cursor += len(captions[beat_id])
     for page in manifest['pages']:
         for beat in page['beats']:
             items = captions[beat['id']]
@@ -395,7 +573,7 @@ def verify_compiled_master(root, timeline):
         if (stream.getframerate(), stream.getnchannels(), stream.getsampwidth()) != (SAMPLE_RATE, 1, 2):
             raise ValueError('Compiled narration format changed')
         samples = np.frombuffer(stream.readframes(stream.getnframes()), dtype='<i2')
-    start = round(timeline['cover_seconds'] * SAMPLE_RATE)
+    start = round(float(timeline.get('voice_start_seconds', timeline['cover_seconds'])) * SAMPLE_RATE)
     master = samples[start:start + report['samples']]
     if hashlib.sha256(master.tobytes()).hexdigest() != report['pcm_sha256']:
         raise ValueError('Compiled narration changed the locked master waveform')

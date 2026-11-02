@@ -35,6 +35,11 @@ def zones(width, height):
                      'height': round(height * (bottom - top))} for name, (top, bottom) in table.items()}
     if height > width:
         result['safe_right'] = round(width * (1 - RIGHT_RAIL))
+    # The watermark (when enabled) takes the quietest of four corners per page; keep one of them free of ink on every page.
+    mark_w, mark_h, edge = round(width * .36), round(height * .04), round(height * .03)
+    result['watermark_corners'] = {name: {'x': x, 'y': y, 'width': mark_w, 'height': mark_h} for name, (x, y) in {
+        'top_right': (width - mark_w - edge, edge), 'top_left': (edge, edge),
+        'bottom_right': (width - mark_w - edge, round(height * .80) - mark_h), 'bottom_left': (edge, round(height * .80) - mark_h)}.items()}
     return result
 
 

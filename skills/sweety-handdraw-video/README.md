@@ -1,6 +1,6 @@
 # sweety-handdraw-video
 
-安装一个 Skill，按主题或文章制作完整手绘讲解视频。当前版本：v2.0.2。
+安装一个 Skill，按主题或文章制作完整手绘讲解视频。当前版本：v3.0.0。
 
 - 使用入口：[SKILL.md](SKILL.md)
 - 项目说明、安装与样片：[GitHub README](https://github.com/threerocks/sweety-handdraw-video)
@@ -10,6 +10,13 @@
 - 内置依赖和冲突处理：[依赖路由](references/dependencies.md)
 
 旁白以本地为主：已安装并明确配置的 VoxCPM2，或兼容的本机 VoiceStudio 服务；火山豆包、Gemini TTS 只在用户配置了自己的密钥并选择时使用；已核对的导出音频可以离线复用。音色目录与试听见[本地声音运行](references/local-runtime.md)。生成新图片还需宿主的图像工具（Claude Code 需接入生图工具 / MCP 或使用用户提供的插画）；Python、fontTools 与 FFmpeg 负责本地合成，图片隐私清理为纯 Python。支持 macOS 与 Linux，`scripts/setup.sh` 一次装好运行环境。内置的参考指南不需要另行安装为 Skills。
+
+### v3.0.0：线稿先行、像人一样画，收官修复
+
+- 先出线稿再上色；笔先起形、按模块描线、橡皮擦掉起形，再按马克笔由浅到深上色；墨线压感与马克笔叠色质感（`drawing.texture`）。
+- 水印每页自动挑空处；旁白在封面渐隐时开口；页头整字逐个出现；框内按词断行；结尾成图停留 2.5 秒。
+- 制作工具包：一部片只写数据（`film_kit.py`、`art_pipeline.py`、`codex_image.py`、`cover.py`）；读法与写法分开（`narration.say`）。
+- 详见 [v3.0.0 发布记录](https://github.com/threerocks/sweety-handdraw-video/blob/main/docs/releases/v3.0.0.md)。更新后读取本目录 `VERSION`，应为 `3.0.0`。
 
 ### v2.0.2：笔不在画面外写字，句尾干净
 

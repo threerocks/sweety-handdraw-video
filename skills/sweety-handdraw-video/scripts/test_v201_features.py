@@ -221,7 +221,7 @@ class GestureAndLintTests(unittest.TestCase):
         import storyboard_lint
         manifest = {'pages': [{'beats': [{'id': 'b1', 'text': '。'}], 'overlays': [{'recipe': 'formula', 'visual': 'v01-eq'}, {'recipe': 'burst'}]}]}
         actions = list(storyboard_lint.page_actions(manifest))
-        self.assertEqual(actions, [(0, ['b1'], {'type': 'overlay', 'recipe': 'formula', 'visual': 'v01-eq'})])
+        self.assertEqual(actions, [(0, ['b1'], {'type': 'overlay', 'recipe': 'formula', 'params': {}, 'visual': 'v01-eq'})])
         self.assertIn('formula', storyboard_lint.TEXT_RECIPES & storyboard_lint.DIAGRAM_RECIPES)
         self.assertTrue({'physics', 'spin3d'} <= storyboard_lint.DIAGRAM_RECIPES)
 
@@ -243,7 +243,10 @@ class SoundEffectTests(unittest.TestCase):
         timeline = {'canvas': {'fps': 30}, 'duration': 6.,
                     'pages': [page(0., 3., overlays=[{'start': 1., 'sound': 'chime'}]),
                               page(3., 6., transition={'type': 'page_turn', 'seconds': 1.}, camera=[{'at': 0}, {'at': 1, 'move': 'slam', 'zoom': 1.5}])]}
-        audio, report = sfx.synthesize(timeline, sfx.parse_options(True))
+        # v3 default: restraint. The chapter page turn sounds; accents are off until a director asks for them.
+        _, quiet_report = sfx.synthesize(timeline, sfx.parse_options(True))
+        self.assertEqual({entry['sound'] for entry in quiet_report['sounds']}, {'paper_flip'})
+        audio, report = sfx.synthesize(timeline, sfx.parse_options({'accents': True}))
         sounds = {(entry['sound'], round(entry['at'], 2)) for entry in report['sounds']}
         start = sfx.transition_windows(timeline)[0][0]
         self.assertIn(('paper_flip', round(start, 2)), sounds)

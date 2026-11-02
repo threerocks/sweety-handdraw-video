@@ -95,6 +95,23 @@ class StoryboardTimingTests(unittest.TestCase):
         atlas = self.timeline([['a.png', [0, 0, 5, 5]], ['a.png', [5, 0, 9, 5]], ['a.png', None]])
         self.assertEqual(timing(board([dict(shot, callback='') for shot in shots]), atlas)[0], [])
 
+    def test_a_picture_each_sentence_annotates_may_carry_up_to_five_beats(self):
+        timed = beats(*[3] * 6)
+        shot = {'beats': [beat['id'] for beat in timed], 'type': 'closeup',
+                'visuals': [picture('v0')] + [{'id': f't{index}', 'kind': 'text_group', 'subject': 'keyword'} for index in range(1, 6)]}
+        events = [{'asset': 'e', 'caption': False, 'visual': 'v0', 'image': ['a.png', None], 'start': 1.5, 'end': 4}]
+        overlays = [{'visual': f't{index}', 'start': beat['start'] + .3, 'end': beat['start'] + 1.3} for index, beat in enumerate(timed[1:5], 1)]
+        page = {'beats': timed[:5], 'events': events, 'overlays': overlays}
+        self.assertEqual(timing(board([shot]), {'pages': [page], 'assets': {'e': {}}})[0], [])
+        page['overlays'] = overlays[:1] + overlays[2:]   # the third sentence adds nothing: the picture lingers
+        self.assertIn('more than 2 consecutive beats (through b2', '\n'.join(timing(board([shot]), {'pages': [page], 'assets': {'e': {}}})[0]))
+        # one form that adds a row in each later sentence (its scheduled moments) carries the picture as well
+        page['overlays'] = [{'visual': 't1', 'start': timed[1]['start'] + .3, 'end': timed[4]['end'],
+                             'moments': [beat['start'] + .3 for beat in timed[1:5]]}]
+        self.assertEqual(timing(board([shot]), {'pages': [page], 'assets': {'e': {}}})[0], [])
+        page.update(beats=timed, overlays=overlays + [{'visual': 't4', 'start': timed[5]['start'] + .3, 'end': timed[5]['start'] + 1.3}])   # a sixth beat is too many
+        self.assertIn('through b5', '\n'.join(timing(board([shot]), {'pages': [page], 'assets': {'e': {}}})[0]))
+
     def test_cadence_counts_scene_parts_but_not_a_slow_single_object(self):
         timed = beats(12)
         timeline = {'pages': [{'beats': timed, 'events': [{'asset': 'e', 'caption': False, 'visual': 'v0', 'image': ['a.png', None],
@@ -212,6 +229,14 @@ class StoryboardBuildTests(unittest.TestCase):
         self.assertIn('leaf.png is not in the storyboard', errors)
         with self.assertRaisesRegex(ValueError, 'v2.*missing from job.json'):
             FilmBuilder(self.root).build()
+
+    def test_only_a_progress_strip_may_be_a_navigation_visual(self):
+        strip = {'recipe': 'roadmap', 'visual': 'where', 'params': {'mode': 'strip', 'groups': [{'label': 'g', 'count': 3}]}}
+        self.manifest['pages'][0]['overlays'] = [strip]
+        self.board['shots'][0]['visuals'].append({'id': 'where', 'kind': 'diagram', 'subject': 'progress', 'role': 'navigation'})
+        self.assertFalse([error for error in usage(self.root, self.manifest, self.board) if 'navigation' in error])
+        strip['params']['mode'] = 'full'                                # a full map explains the list: it is not navigation
+        self.assertTrue([error for error in usage(self.root, self.manifest, self.board) if 'navigation' in error])
 
     def test_build_records_page_composition_and_production_rejects_tiny_pictures(self):
         timeline = FilmBuilder(self.root).build()
@@ -353,6 +378,15 @@ class PresentationDensityTests(unittest.TestCase):
         report = plan(board(add_dense_composition(shots), presentation={'mode': 'dense_infographic', 'reason': '成人科普信息图'}), timed)
         self.assertEqual(report['stats']['presentation_density'], 'dense')
         self.assertEqual(report['errors'], [])
+
+    def test_a_progress_strip_is_navigation_not_a_picture_of_the_shot(self):
+        timed = beats(10)
+        strip = {'id': 'where', 'kind': 'diagram', 'subject': 'progress strip'}
+        shots = [{'beats': ['b0'], 'type': 'closeup', 'visuals': [picture('v0'), {'id': 'form', 'kind': 'diagram', 'subject': 'table'}, strip]}]
+        focus = {'mode': 'focus_diagram', 'reason': '一图一形式'}
+        self.assertIn('at most 2', '\n'.join(plan(board(shots, presentation=focus), timed)['errors']))
+        strip['role'] = 'navigation'
+        self.assertFalse([e for e in plan(board(shots, presentation=focus), timed)['errors'] if 'at most' in e])
 
 
 if __name__ == '__main__':

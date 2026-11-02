@@ -6,7 +6,10 @@ recorded or downloaded.
 The layer is quiet by design (it sits under the voice, ducks further while someone speaks, and is low-passed so it
 never hisses) and sample-synced to the same transition windows the renderer draws.
 
-job.json "audio": {"sfx": true | false | {"gain_db": 0, "transitions": true, "accents": true, "seed": 0}} (on by default)."""
+job.json "audio": {"sfx": true | false | {"gain_db": 0, "transitions": true, "accents": false, "quiet_moves": false, "seed": 0}}
+(on by default). Restraint by default (v3): only the signature chapter turns sound; ordinary pans, pushes and wipes are
+silent and accent chimes and thumps are off, because each extra sound is one more chance to break a viewer's mood
+(a sound that does not belong costs attention; the tenth whoosh is noise). Turn them on with a reason."""
 from pathlib import Path
 import hashlib
 import json
@@ -20,8 +23,9 @@ LAYER_GAIN = .5                 # mixer gain; the file is written 6 dB hotter so
 PEAK_DBFS = -26.                # loudest point of a sound at gain_db 0, before ducking
 DUCK_DB = 6.
 SMOOTH_HZ = 6000.
-OPTION_KEYS = {'enabled', 'gain_db', 'transitions', 'accents', 'seed'}
+OPTION_KEYS = {'enabled', 'gain_db', 'transitions', 'accents', 'quiet_moves', 'seed'}
 
+QUIET_MOVES = {'push', 'pan', 'slide', 'wipe', 'zoom', 'legacy'}   # ordinary camera-like moves: silent unless quiet_moves
 # Transition type -> sound and its level relative to PEAK_DBFS.
 TRANSITION_SOUNDS = {
     'page_turn': ('paper_flip', 0.), 'slide_over': ('paper_slide', -3.), 'card_flip': ('paper_flip', -2.), 'cube': ('paper_slide', -4.),
@@ -46,7 +50,7 @@ def parse_options(value):
     if not value.get('enabled', True):
         return None
     options = {'gain_db': float(value.get('gain_db', 0.)), 'transitions': bool(value.get('transitions', True)),
-               'accents': bool(value.get('accents', True)), 'seed': value.get('seed', 0)}
+               'accents': bool(value.get('accents', False)), 'quiet_moves': bool(value.get('quiet_moves', False)), 'seed': value.get('seed', 0)}
     if not math.isfinite(options['gain_db']) or not -18 <= options['gain_db'] <= 6:
         raise ValueError('audio.sfx.gain_db must be within -18..6 dB')
     if not isinstance(options['seed'], int) or isinstance(options['seed'], bool):
@@ -194,7 +198,7 @@ def synthesize(timeline, options, narration=None):
     if options['transitions']:
         for start, end, kind, style in transition_windows(timeline):
             entry = TRANSITION_SOUNDS.get(kind)
-            if not entry:
+            if not entry or (kind in QUIET_MOVES and not options['quiet_moves']):
                 continue
             sound, level = entry
             if kind == 'erase' and style == 'rubber':

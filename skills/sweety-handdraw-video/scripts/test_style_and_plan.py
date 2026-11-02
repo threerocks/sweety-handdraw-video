@@ -12,6 +12,16 @@ import stroke_assets
 from video_job import find_font
 
 
+# A model-chosen style must record how it follows the content (style_fit.py).
+CONTENT_FIT = {'content_analysis': {'genre': 'science', 'era': 'present day', 'audience_band': 'adults', 'tone': {'primary': 'curious', 'humor_density': .1},
+                                    'sensitivity': 'low', 'narrative_stance': 'explainer', 'evidence': ['b1 sets the topic', 'b2 names the audience', 'b3 sets the tone']},
+               'style_family': 'science_atlas', 'characters': [], 'avoid': ['chibi faces', 'neon glow'],
+               'directions': [{'family': 'science_atlas', 'idea': 'cutaway of the object', 'score': 8},
+                              {'family': 'editorial_concept', 'idea': 'one visual metaphor', 'score': 6},
+                              {'family': 'ligne_claire', 'idea': 'clear-line scene', 'score': 5}],
+               'diversity': {'differs_on': ['family', 'palette', 'line']}}
+
+
 class StyleAndPlanTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -45,6 +55,8 @@ class StyleAndPlanTests(unittest.TestCase):
                 resolved['drawing_mode']='draw'
         if mode in ('catalog_auto','inferred'):
             resolved['content_fit']='Matches the explanation in this fixture'
+        if mode in ('catalog_auto','inferred') or confirmation in ('timeout_default','user_delegated'):
+            resolved.update(json.loads(json.dumps(CONTENT_FIT)))
         if mode=='custom':
             resolved['style_basis']=selection['user_description']
         if mode in ('inferred','custom'):

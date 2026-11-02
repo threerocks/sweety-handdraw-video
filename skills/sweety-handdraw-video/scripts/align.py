@@ -25,6 +25,7 @@ SYNC_TOLERANCE_SECONDS = .3
 SYNC_GAP_SECONDS = .2
 # Clause breaks in fluent narration can be 30-50 ms; shifting cues by 0.4 s still fails nearly every cue.
 SYNC_PAUSE_SECONDS = .03
+FLUENT_PAUSE_SECONDS = .08   # shorter dips inside speech are not heard as pauses (close_fluent_gaps)
 TRANSCRIBE = r'''
 import json, sys, mlx_whisper
 language = sys.argv[3] if len(sys.argv) > 3 else 'zh'
@@ -37,6 +38,28 @@ except ImportError:
 words = [{'text': convert(word['word']).strip(), 'start': word['start'], 'end': word['end']}
          for segment in result['segments'] for word in segment.get('words', [])]
 print(json.dumps({'text': convert(result['text']), 'words': words}, ensure_ascii=False))
+'''
+# English words inside Chinese narration, heard by an English ear: Chinese recognition finds where they are (it is
+# lenient: it writes "Agent" for a Chinese-accented guess), each span is cut out and transcribed as English.
+ENGLISH_HEAR = r'''
+import json, re, subprocess, sys, tempfile, mlx_whisper
+path, model = sys.argv[1], sys.argv[2]
+found = mlx_whisper.transcribe(path, path_or_hf_repo=model, language='zh', word_timestamps=True, initial_prompt='以下是普通话的句子，夹有英文词。')
+spans = []
+for word in (w for s in found['segments'] for w in s.get('words', [])):
+    if re.search('[A-Za-z]', word['word']):
+        if spans and word['start'] - spans[-1][1] < .12:
+            spans[-1] = (spans[-1][0], word['end'])
+        else:
+            spans.append((word['start'], word['end']))
+heard = []
+with tempfile.TemporaryDirectory() as folder:
+    for index, (start, end) in enumerate(spans):
+        clip = f'{folder}/{index}.wav'
+        subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', str(max(0., start - .1)), '-t', str(end - start + .2), '-i', path, '-ac', '1', '-ar', '16000', clip], check=True)
+        text = mlx_whisper.transcribe(clip, path_or_hf_repo=model, language='en', temperature=0.)['text']
+        heard.append({'start': round(start, 3), 'end': round(end, 3), 'text': text.strip()})
+print(json.dumps({'spans': heard}, ensure_ascii=False))
 '''
 FORCE_ALIGN = r'''
 import json, sys
@@ -110,31 +133,48 @@ def edit_rate(expected, actual):
 
 
 def cer(expected, actual):
-    return edit_rate(spoken(numbers(expected)), spoken(numbers(actual)))
+    return edit_rate(spoken(numbers(expected)).lower(), spoken(numbers(actual)).lower())
 
 
 def syllables(text):
-    """Toneless pinyin per Han character in context; digits, Latin letters and signs stay one token each."""
+    """Toneless pinyin per Han character in context; digits, Latin letters and signs stay one token each. Common accent
+    pairs count as one sound (zh/z, ch/c, sh/s, n/l, en/eng, in/ing, an/ang): a voice that says 审 like 省 still said the
+    syllable, and the check is for a syllable missing or misread, not for accent (the v3 film: “这些他审” heard as
+    “这些他省” in every take of a voice whose 审 passed everywhere else)."""
     from pypinyin import lazy_pinyin
-    return lazy_pinyin(text, errors=lambda other: list(other))
+    return [accent_merged(item) for item in lazy_pinyin(text, errors=lambda other: list(other))]
 
 
-def anchored(expected, actual, error, max_cer):
+def accent_merged(syllable):
+    for retroflex, flat in (('zh', 'z'), ('ch', 'c'), ('sh', 's')):
+        if syllable.startswith(retroflex):
+            syllable = flat + syllable[2:]
+            break
+    if syllable.startswith('n') and syllable not in ('n', 'ng'):
+        syllable = 'l' + syllable[1:]
+    for back, front in (('ang', 'an'), ('eng', 'en'), ('ing', 'in')):
+        if syllable.endswith(back):
+            return syllable[:-len(back)] + front
+    return syllable
+
+
+def anchored(expected, actual, error, max_cer, end_slack=2):
     blocks = [block for block in SequenceMatcher(None, expected, actual, autojunk=False).get_matching_blocks() if block.size]
-    return bool(blocks) and error <= max_cer and blocks[0].a <= 2 and blocks[-1].a + blocks[-1].size >= len(expected) - 2
+    return bool(blocks) and error <= max_cer and blocks[0].a <= 2 and blocks[-1].a + blocks[-1].size >= len(expected) - end_slack
 
 
-def covers(expected, actual, max_cer=.15, homophones=True):
+def covers(expected, actual, max_cer=.15, homophones=True, end_slack=2):
     """ASR must cover the whole text: low CER and matched characters near both ends (numbers compared by value).
 
     Whisper writes rare characters as common homophones (蓑笠 -> 梭利, 钓 -> 吊, 大雪 -> 大学), which fails short
     classical lines that were read correctly. With homophones=True a failing character comparison is checked again on
     toneless pinyin (when pypinyin is installed): homophones pass; skipped, babbled or misread numbers still fail.
     Verbatim transcripts (voice references) pass homophones=False."""
-    raw_expected, raw_actual = expected, actual
-    expected, actual = spoken(numbers(expected)), spoken(numbers(actual))
+    # Letter case is the recognizer's spelling, not the voice's: "amend" read correctly comes back as "Amend".
+    raw_expected, raw_actual = expected.lower(), actual.lower()
+    expected, actual = spoken(numbers(raw_expected)), spoken(numbers(raw_actual))
     error = edit_rate(expected, actual)
-    result = {'cer': round(error, 3), 'status': 'pass' if anchored(expected, actual, error, max_cer) else 'fail',
+    result = {'cer': round(error, 3), 'status': 'pass' if anchored(expected, actual, error, max_cer, end_slack) else 'fail',
               'asr_text': raw_actual, 'comparison_text': actual}
     if result['status'] == 'fail' and homophones:
         # Number normalization reads a homophone as a numeral (牵牛 heard as 千牛 -> 1000牛), so the pinyin check also
@@ -147,9 +187,56 @@ def covers(expected, actual, max_cer=.15, homophones=True):
             scored = [(edit_rate(e, a), e, a) for e, a in pairs]
             pinyin_error, expected_syllables, actual_syllables = min(scored, key=lambda item: item[0])
             result['pinyin_cer'] = round(pinyin_error, 3)
-            if anchored(expected_syllables, actual_syllables, pinyin_error, max_cer):
+            if anchored(expected_syllables, actual_syllables, pinyin_error, max_cer, end_slack):
                 result.update(status='pass', matched_by='pinyin')
     return result
+
+
+LATIN_WORD = re.compile(r'[A-Za-z][A-Za-z\-]*')
+# An English ear writes some correctly spoken words as their sound-alikes (native "git" is transcribed "get").
+SOUND_ALIKE = {'git': {'get'}, 'ai': {'ay', 'aye', 'a i'}}
+HEARD_RATIO = .75
+
+
+def english_words(text):
+    """The English words a Chinese narration line asks the voice to say (lowercase, in order)."""
+    return [word.lower() for word in LATIN_WORD.findall(text)]
+
+
+def english_heard(path, text, python=None, model=None):
+    """Which English words of a Chinese narration line an English ear hears in the audio. A Chinese-accented guess
+    that Chinese recognition still writes as "bug" is often heard as "the" in English: the film's "bug", "git", "Amp" and
+    "Thorsten Ball" were all passed by the Chinese check. Returns {'status', 'words': [{word, heard}], 'heard'} or
+    None when no local recognizer is installed."""
+    expected = english_words(text)
+    if not expected:
+        return {'status': 'pass', 'words': [], 'heard': ''}
+    from voice_backends import tools, run_python
+    found = tools()
+    python, model = python or found['mlx_python'], model or found['asr_model']
+    if not python or not model:
+        return None
+    spans = run_python(python, ENGLISH_HEAR, path, model)['spans']
+    heard = ' '.join(span['text'] for span in spans)
+    tokens = re.findall(r'[a-z]+', heard.lower())
+    candidates = set(tokens) | {a + b for a, b in zip(tokens, tokens[1:])}
+    def hit(word):
+        word = word.replace('-', '')
+        alike = SOUND_ALIKE.get(word, set()) | {word, word.rstrip('s') if len(word) > 3 else word}
+        for heard_token in candidates:
+            if heard_token in alike:
+                return True
+            if len(word) <= 3:
+                # a short word must be heard as itself: "am" scores 0.8 against "amp" and passed a voice that said "I am"
+                # ("I am pleased" for "Amp"); only a little trailing bleed is allowed ("Ampli")
+                if heard_token.startswith(word) and len(heard_token) <= len(word) + 2:
+                    return True
+                continue
+            if SequenceMatcher(None, word, heard_token).ratio() >= HEARD_RATIO or word in heard_token:
+                return True
+        return any(' '.join(tokens[k:k + 2]) in alike for k in range(len(tokens)))
+    words = [{'word': word, 'heard': hit(word)} for word in expected]
+    return {'status': 'pass' if all(item['heard'] for item in words) else 'fail', 'words': words, 'heard': heard}
 
 
 def char_times(text, words):
@@ -291,6 +378,21 @@ def snap_to_onsets(found, ranges, tolerance=SYNC_TOLERANCE_SECONDS / 2):
     return [tuple(span) for span in result]
 
 
+def close_fluent_gaps(samples, ranges, rate=SAMPLE_RATE, tolerance=SYNC_TOLERANCE_SECONDS):
+    """A short gap between pieces (an ASR word boundary at a comma) where the voice never pauses is closed: the earlier
+    piece runs on to the next start, so a caption never shows a break the listener does not hear. Starts never move:
+    an independent ASR pass placed them within a few hundredths of a second, while nearby pauses were a second away."""
+    # A dip shorter than FLUENT_PAUSE_SECONDS is not heard as a pause, and loudness normalization can shrink it below
+    # the onset detector's floor: a caption gap over it would hinge on which stem is measured.
+    quiet = [pause for pause in pauses(samples, rate, SYNC_PAUSE_SECONDS) if pause[1] - pause[0] >= FLUENT_PAUSE_SECONDS]
+    result = [list(span) for span in ranges]
+    for previous, following in zip(result, result[1:]):
+        gap = following[0] - previous[1]
+        if 0 < gap <= tolerance and not any(left < following[0] + tolerance and right > previous[1] - tolerance for left, right in quiet):
+            previous[1] = following[0]
+    return [tuple(span) for span in result]
+
+
 def piece_ranges(samples, texts, words=None, rate=SAMPLE_RATE):
     """Ranges (seconds within samples) for consecutive text pieces, from timestamps or pauses."""
     if words:
@@ -307,8 +409,10 @@ def piece_ranges(samples, texts, words=None, rate=SAMPLE_RATE):
 
 def entry(beat_id, text, texts, ranges, method):
     """One alignment beat: absolute range plus caption cues relative to the beat start."""
-    start, end = ranges[0][0], ranges[-1][1]
+    # Round the beat first, so no cue ends past the beat its reader measures (end - start of the rounded values).
+    start, end = round(ranges[0][0], 3), round(ranges[-1][1], 3)
     cues = [{'text': piece, 'start': round(max(0., left - start), 3), 'end': round(min(end, right) - start, 3)} for piece, (left, right) in zip(texts, ranges)]
+    cues[-1]['end'] = min(cues[-1]['end'], round(end - start, 3))
     for previous, following in zip(cues, cues[1:]):
         previous['end'] = min(previous['end'], following['start'])
     return {'id': beat_id, 'text': text, 'start': round(start, 3), 'end': round(end, 3), 'caption_cues': cues, 'cue_method': method}
@@ -380,18 +484,23 @@ def spoken_syllables(text):
     return count
 
 
-def align_master(source, beats, words, output, script_sha256, limit=None):
-    """Alignment for a whole user-provided master from ASR/aligner character times; limit: CJK characters per cue."""
-    times, matched = char_times(''.join(beat['text'] for beat in beats), words)
+def align_master(source, beats, words, output, script_sha256, limit=None, speak=None):
+    """Alignment for a whole user-provided master from ASR/aligner character times; limit: CJK characters per cue.
+    speak(beat, text) gives what the voice says for displayed text (narration.say); times follow the spoken form."""
+    speak = speak or (lambda beat, text: text)
+    times, matched = char_times(''.join(speak(beat, beat['text']) for beat in beats), words)
     try:
         found = onsets(read_wave(source), SAMPLE_RATE, SYNC_PAUSE_SECONDS)
     except (OSError, ValueError, subprocess.CalledProcessError):
         found = None  # no readable audio (a placeholder in tests): keep the ASR times as they are
     pieces, cursor = [], 0
     for beat in beats:
-        count = len(spoken(beat['text']))
+        count = len(spoken(speak(beat, beat['text'])))
         texts = caption_texts(beat['text'], limit, split_long=True) if limit else caption_texts(beat['text'])
-        pieces.append((beat, texts, ranges_from_times(texts, times[cursor:cursor + count])))
+        said = [speak(beat, text) for text in texts]
+        if ''.join(said) != speak(beat, beat['text']):
+            texts, said = [beat['text']], [speak(beat, beat['text'])]
+        pieces.append((beat, texts, ranges_from_times(said, times[cursor:cursor + count])))
         cursor += count
     if found is not None:
         # Snap across the whole master, so a sentence's first cue (and so the sentence itself) also starts on the voice.
@@ -418,7 +527,7 @@ if __name__ == '__main__':
     arguments = parser.parse_args()
     root = arguments.job.resolve()
     manifest = json.loads((root/'job.json').read_text())
-    from narration_master import script_text
+    from narration_master import script_text, spoken_text
     settings = manifest['narration']
     source = root/settings['source']
     words = json.loads(arguments.words.read_text()) if arguments.words else transcribe(source, language=manifest.get('language', 'zh'))
@@ -427,5 +536,5 @@ if __name__ == '__main__':
     beats = [beat for page in manifest['pages'] for beat in page['beats']]
     from caption_assets import cue_char_limit
     result = align_master(source, beats, words['words'], root/settings['alignment'], hashlib.sha256(script_text(manifest).encode()).hexdigest(),
-                          cue_char_limit(manifest))
+                          cue_char_limit(manifest), lambda beat, text: spoken_text(manifest, beat, text))
     print(json.dumps({'beats': len(result['beats']), 'matched_characters': result['matched_characters']}, ensure_ascii=False))

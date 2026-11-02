@@ -9,6 +9,8 @@ Runs in a few seconds, right after generation (before region marks, drawing revi
 - line art: the same gate the build applies (texture, specks, too many crossings);
 - drawing time: the strokes and minimum seconds at the planned size, against the seconds the storyboard gives this
   visual (storyboard_lint.py --budget).
+--plate checks a line_first line plate before its colour edit, while it is still cheap to change: its enclosed areas
+are given stand-in tones so the colouring time counts too (an estimate: the real palette may split areas further).
 On failure it prints prompt_fix: a sentence to add to the image prompt (e.g. how many outlines to aim for) before
 regenerating. It never edits the image or the records.
 """
@@ -76,14 +78,15 @@ def budget_seconds(root, manifest, source, visual):
     return None, visual
 
 
-def check(root, image_path, visual=None, width=None):
+def check(root, image_path, visual=None, width=None, plate=False):
     import line_drawing
+    import line_first
     import stroke_assets
     root = Path(root).resolve()
     manifest = json.loads((root / 'job.json').read_text()) if (root / 'job.json').is_file() else {}
     source = str(Path(image_path).resolve().relative_to(root)) if Path(image_path).resolve().is_relative_to(root) else str(image_path)
     image = Image.open(image_path)
-    problems, measures = transparency(image)
+    problems, measures = ([], {'line_plate': True}) if plate else transparency(image)
     action = find_action(manifest, source, visual)
     seconds, visual = budget_seconds(root, manifest, source, visual)
     width = width or (action['width'] if action else 760)
@@ -95,7 +98,10 @@ def check(root, image_path, visual=None, width=None):
     with tempfile.TemporaryDirectory() as directory:
         stroke_assets.configure_assets(directory, '/dev/null', 0, int(manifest.get('canvas', {}).get('fps', 30)))
         try:
-            metadata = stroke_assets.build_illustration('gate', Path(image_path), plan_width, plan_height, (action or {}).get('crop'), parts,
+            # A picture with an explicit outline (line_first or a hand-made mask) is drawn from that mask, so it is measured with it.
+            explicit = root / action['outline_mask'] if action and action.get('outline_mask') else None
+            built, mask = line_first.plate_preview(image_path, directory) if plate else (Path(image_path), explicit)
+            metadata = stroke_assets.build_illustration('gate', built, plan_width, plan_height, (action or {}).get('crop'), parts, mask,
                                                         drawing=drawing, lineart_exception=(action or {}).get('lineart_exception'))
             drawability = metadata['drawability']
             result.update(strokes=drawability['stroke_count'], minimum_seconds=drawability['minimum_seconds'])
@@ -118,6 +124,10 @@ def check(root, image_path, visual=None, width=None):
         elif kind == 'too_complex':
             fixes.append(f'Use at most {result["target_strokes"]} separate outlines in the whole image: drop secondary props and background, '
                          'merge small details into their parent shape, keep only what the narration needs.')
+            if plate:
+                # Cheaper than a new picture: an edit of the plate that names what to drop keeps everything else in place.
+                result['edit_fix'] = ('Edit this line drawing (image 1): erase <the details the narration does not need, named one by one>. '
+                                      'Keep every other line exactly where it is, with the same thickness; add nothing.')
         elif kind == 'lineart':
             fixes.append('Thick, even, continuous outlines that close every shape; no hatching, texture strokes, specks or broken lines.')
     result.update(status='fail' if problems else 'pass', problems=[{'kind': kind, 'detail': detail} for kind, detail in problems],
@@ -131,8 +141,9 @@ def main():
     parser.add_argument('image', type=Path)
     parser.add_argument('--visual')
     parser.add_argument('--width', type=int, help='planned on-screen width (default: the job action, else 760)')
+    parser.add_argument('--plate', action='store_true', help='the image is a line_first line plate, checked before its colour edit')
     arguments = parser.parse_args()
-    report = check(arguments.job, arguments.image, arguments.visual, arguments.width)
+    report = check(arguments.job, arguments.image, arguments.visual, arguments.width, arguments.plate)
     print(json.dumps(report, ensure_ascii=False, indent=1))
     return 0 if report['status'] == 'pass' else 1
 

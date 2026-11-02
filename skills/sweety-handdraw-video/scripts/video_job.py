@@ -25,6 +25,8 @@ from timeline_contract import validate_page_motion
 
 PACKAGE = Path(__file__).resolve().parents[1]
 SAMPLE_RATE = 48000
+ENDING_SETTLE = 2.5       # seconds the finished last picture holds after the end hold (3.0)
+COVER_VOICE_OVERLAP = .5  # seconds of the cover fade the voice already speaks over (3.0; 0 = the 2.x timing)
 
 
 def load_manifest(job_directory):
@@ -215,6 +217,26 @@ def expand_actions(specs):
     return result
 
 
+# when a form adds a row, an item, a node, a tick (durations are not moments); a custom script names its own as `moments`
+MOMENT_KEYS = {'ms', 'mark_ms', 'row_ms', 'moments'}
+
+
+def scheduled_moments(params):
+    """Milliseconds (from the layer's start) at which a motion layer adds something inside itself."""
+    found = []
+    def walk(value, key=None):
+        if isinstance(value, dict):
+            for name, item in value.items():
+                walk(item, name)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item, key)
+        elif key in MOMENT_KEYS and isinstance(value, (int, float)) and math.isfinite(value):
+            found.append(float(value))
+    walk(params)
+    return found
+
+
 GESTURE_RECIPES = ('rough_annotate', 'sketch_shapes', 'rough_chart', 'callout', 'number_ticker', 'progress_ring', 'kinetic_title', 'morph',
                    'map_route', 'burst', 'formula', 'physics', 'spin3d')
 
@@ -295,13 +317,99 @@ def moment(spec, page, beats, default):
     return page['start'] + float(at)
 
 
+SCREEN_FURNITURE = ('kinetic_title', 'roadmap')  # screen layers ink never sits on: titles and the progress strip
+
+
+def ink_on_screen_layer(page_spec):
+    """True when drawn ink (handwriting, a picture) lands on a screen-space motion layer of the page."""
+    layers = [item for item in page_spec.get('overlays', []) if item.get('space', 'board') == 'screen'
+              and item.get('recipe') not in SCREEN_FURNITURE and all(key in item for key in ('x', 'y', 'width', 'height'))]
+    if not layers:
+        return False
+    actions = [action for group in page_spec.get('visual_groups', []) for action in group.get('actions', [])]
+    actions += [action for beat in page_spec.get('beats', []) for action in beat.get('actions', [])]
+    for action in actions:
+        if action.get('type') == 'text' and 'x' in action and 'y' in action:
+            size = float(action.get('size', 48))
+            box = {'x': float(action['x']), 'y': float(action['y']), 'width': size * max(1, len(str(action.get('text', '')))), 'height': size}
+        elif action.get('type') == 'illustration' and all(key in action for key in ('x', 'y', 'width', 'height')):
+            box = action
+        else:
+            continue
+        if any(box_overlap(box, layer) * min(box['width'] * box['height'], layer['width'] * layer['height'])
+               >= .3 * box['width'] * box['height'] for layer in layers):
+            return True
+    return False
+
+
+def asset_ink_box(work, name):
+    """(left, top, right, bottom) of an asset's ink in its own pixels, or None."""
+    path = Path(work) / 'assets' / f'{name}.png'
+    if not path.is_file():
+        return None
+    pixels = np.asarray(Image.open(path).convert('RGBA'))
+    ys, xs = np.nonzero((pixels[..., 3] > 32) & (pixels[..., :3].min(axis=2) < 232))
+    return (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1) if len(xs) else None
+
+
+def guard_screen_titles(keys, page, page_spec, assets, work, width, height, gap=8):
+    """Screen-space titles stay put while the auto camera pushes in, so a push could carry the picture into the title
+    (the deposit film's last page: hair into 只讲, the window frame through 两件事). Back each push off until the page's
+    ink clears every screen title; pages whose ink meets a title even unzoomed are left to director_lint."""
+    from director_lint import title_box
+    titles = [title_box(item) for item in page_spec.get('overlays', []) if item.get('recipe') == 'kinetic_title'
+              and item.get('space', 'board') == 'screen' and all(key in item for key in ('x', 'y', 'width', 'height'))]
+    if not titles:
+        return keys
+    boxes = []
+    for event in page['events']:
+        if event['caption'] or event['asset'] not in assets:
+            continue
+        ink = asset_ink_box(work, event['asset'])
+        if ink:
+            scale = float(event.get('scale', 1.))
+            boxes.append([event['x'] + ink[0] / scale, event['y'] + ink[1] / scale, event['x'] + ink[2] / scale, event['y'] + ink[3] / scale])
+
+    def clashes(center, zoom):
+        cx = min(max(center[0], width / (2 * zoom)), width - width / (2 * zoom))
+        cy = min(max(center[1], height / (2 * zoom)), height - height / (2 * zoom))
+        for x0, y0, x1, y1 in boxes:
+            left, top = (x0 - cx) * zoom + width / 2, (y0 - cy) * zoom + height / 2
+            right, bottom = (x1 - cx) * zoom + width / 2, (y1 - cy) * zoom + height / 2
+            if any(left < tx + tw + gap and tx - gap < right and top < ty + th + gap and ty - gap < bottom for tx, ty, tw, th in titles):
+                return True
+        return False
+
+    if not boxes or clashes([width / 2, height / 2], 1.):
+        return keys
+    for key in keys:
+        zoom = float(key['zoom'])
+        if zoom > 1 and clashes(key['center'], zoom):
+            while zoom > 1 and clashes(key['center'], zoom):
+                zoom = max(1., zoom - .01)
+            key['zoom'] = round(zoom, 3)
+            page['auto'] = sorted(set(page.get('auto', [])) | {'camera_backed_off_for_title'})
+    return keys
+
+
+TAKE_TURNS_OVERLAP = .12  # share of the smaller title box two layers must share before one gives way (a 5 px graze is not a clash)
+
+
+def box_overlap(first, second):
+    """Intersection area of two x/y/width/height boxes over the smaller box's area (0 when they only touch)."""
+    width = min(first['x'] + first['width'], second['x'] + second['width']) - max(first['x'], second['x'])
+    height = min(first['y'] + first['height'], second['y'] + second['height']) - max(first['y'], second['y'])
+    if width <= 0 or height <= 0:
+        return 0.
+    return width * height / max(1., min(first['width'] * first['height'], second['width'] * second['height']))
+
+
 def take_turns(titles, page):
     """Titles that share a spot on screen take turns: one still showing when the next arrives finishes leaving first
     (it fades out in the gap, or as late as its own entrance allows), so two titles never read as one line."""
     titles = sorted(titles, key=lambda event: event['start'])
     for number, earlier in enumerate(titles):
-        later = next((event for event in titles[number + 1:] if earlier['x'] < event['x'] + event['width'] and event['x'] < earlier['x'] + earlier['width']
-                      and earlier['y'] < event['y'] + event['height'] and event['y'] < earlier['y'] + earlier['height']), None)
+        later = next((event for event in titles[number + 1:] if box_overlap(earlier, event) >= TAKE_TURNS_OVERLAP), None)
         leaving = earlier.get('exit') or {'style': 'fade', 'start': page['end'], 'end': page['end']}
         if later is None or leaving['end'] <= later['start'] + 1e-6:
             continue
@@ -556,12 +664,14 @@ class FilmBuilder:
             board = scale if space == 'board' else 1.
             render = web_motion.render(spec['recipe'], spec.get('params', {}), width, height, seconds, self.work / 'web-motion',
                                        self.fps, board, int(spec.get('seed', 1 + index)))
-            if render.get('clipped') and not spec.get('bleed'):
+            if render.get('clipped') and not spec.get('bleed') and not (spec['recipe'] == 'map_route' and spec.get('params', {}).get('projection') == 'flat'):  # a flat map's coastlines run off its frame by design
                 raise ValueError(f'Overlay {spec["recipe"]} on page {page["index"] + 1} is cut off at the edge of its {width:g}x{height:g} box: '
                                  'enlarge width/height or shrink the content (titles shrink to fit automatically); set "bleed": true only '
                                  'for content meant to run off the edge')
             event = {'recipe': spec['recipe'], 'space': space, 'x': x, 'y': y, 'width': width, 'height': height, 'scale': board,
                      'start': round(start, 3), 'end': round(start + seconds, 3), 'frames': render['directory'], 'count': render['frames'],
+                     'moments': sorted({round(start, 3)} | {round(start + value / 1000, 3) for value in scheduled_moments(spec.get('params', {}))
+                                                            if 0 <= value <= seconds * 1000}),
                      'z': int(spec.get('z', 60)), **({'visual': spec['visual']} if spec.get('visual') else {})}
             if spec.get('depth'):
                 if space != 'board':
@@ -614,7 +724,19 @@ class FilmBuilder:
         cover_seconds = float(self.manifest.get('cover', {}).get('seconds', 1.0))
         if cover_seconds != 1.0:
             raise ValueError('Cover must last exactly 1 second: 0.5 seconds still, then 0.5 seconds fade')
-        pieces = [np.zeros(round(cover_seconds * SAMPLE_RATE), dtype=np.int16)]
+        # The voice starts while the cover fades (0.5 s), so the first words come before the 1 s mark; the cover stays
+        # 0.5 s still and fades over the first strokes instead of over blank paper.
+        fixture = bool(self.manifest.get('runtime_fixture'))
+        overlap = float(self.manifest.get('cover', {}).get('voice_overlap', 0. if fixture else COVER_VOICE_OVERLAP))
+        if not 0 <= overlap <= .5:
+            raise ValueError('cover.voice_overlap must be within 0..0.5 seconds (the cover fade)')
+        voice_start = cover_seconds - overlap
+        pieces = [np.zeros(round(voice_start * SAMPLE_RATE), dtype=np.int16)]
+        # After the last word the finished picture stays a moment (user, 2026-11-02: "加停顿吧"): the film settles
+        # instead of cutting at the final syllable. Voice-tail limits still apply to the narration master itself.
+        settle = float(self.manifest.get('ending', {}).get('settle_seconds', 0. if fixture else ENDING_SETTLE))
+        if not math.isfinite(settle) or not 0 <= settle <= 3.5:
+            raise ValueError('ending.settle_seconds must be within 0..3.5 seconds')
         master_samples, master_beats, master_report = None, {}, None
         if self.manifest.get('narration') or not self.manifest.get('runtime_fixture'):
             master_samples, master_beats, master_report = load_master(self.root, self.manifest, self.work/'audio/master.wav')
@@ -627,6 +749,11 @@ class FilmBuilder:
                     'camera': page_spec.get('camera'), 'transition': page_spec.get('transition')}
             import direction
             auto_camera = self.direction['camera'] == 'auto' and not page_spec.get('camera') and not self.manifest.get('runtime_fixture')
+            if auto_camera and ink_on_screen_layer(page_spec):
+                # The pen writes on a screen-space layer (a coded certificate, a card): a moving board would slide the
+                # writing off the card it belongs to (aunt-doctor film), so this page keeps a still camera.
+                auto_camera = False
+                page['auto'] = page.get('auto', []) + ['camera_held_for_screen_layer']
             scale = max(page_scale(page_spec), direction.AUTO_ZOOM) if auto_camera else page_scale(page_spec)
             if page_index and not page['transition'] and self.direction['transitions'] == 'auto' and not self.manifest.get('runtime_fixture'):
                 page['transition'] = direction.auto_transition(page_index, page_spec, (pages[-1].get('transition') or {}).get('type'))
@@ -647,7 +774,7 @@ class FilmBuilder:
                 self.seen_beat_ids.add(beat_id)
                 if master_report:
                     aligned = master_beats[beat_id]
-                    cursor = cover_seconds + aligned['start']
+                    cursor = voice_start + aligned['start']
                     duration = aligned['end'] - aligned['start']
                     measurements = {'source_seconds': master_report['duration'], 'master_start': aligned['start'],
                                     'master_end': aligned['end'], 'used_seconds': duration}
@@ -658,8 +785,9 @@ class FilmBuilder:
                 beat = {'id': beat_id, 'start': cursor, 'end': cursor + duration, 'duration': duration, 'text': beat_spec['text']}
                 if not str(beat['text']).strip():
                     raise ValueError('Narration text cannot be empty')
-                if not beat_spec.get('actions') and not page_spec.get('visual_groups'):
-                    raise ValueError('Every beat needs actions or a page visual group')
+                if not beat_spec.get('actions') and not page_spec.get('visual_groups') and not page_spec.get('overlays'):
+                    # A page may be explained entirely by its motion layers (a prism, a commit graph): the pen rests.
+                    raise ValueError('Every beat needs actions, a page visual group or motion layers (overlays)')
                 cue_source = aligned if master_report else beat_spec
                 if cue_source.get('caption_cues'):
                     beat['caption_cues'] = cue_source['caption_cues']
@@ -733,24 +861,25 @@ class FilmBuilder:
                     page['events'].append(action)
                     start += seconds + travel
             page['speech_end'] = page['beats'][-1]['end']
-            pause = float(options.get('page_pause_seconds', .24)) if page_index < len(self.manifest['pages']) - 1 else float(options.get('end_hold_seconds', .45))
+            pause = float(options.get('page_pause_seconds', .24)) if page_index < len(self.manifest['pages']) - 1 else float(options.get('end_hold_seconds', .45)) + settle
             if pause < 0:
                 raise ValueError('Audio pauses must be nonnegative')
             if master_report:
                 if page_index + 1 < len(self.manifest['pages']):
                     next_id = self.manifest['pages'][page_index + 1]['beats'][0]['id']
-                    cursor = cover_seconds + master_beats[next_id]['start']
+                    cursor = voice_start + master_beats[next_id]['start']
                 else:
-                    cursor = cover_seconds + len(master_samples) / SAMPLE_RATE + pause
+                    cursor = voice_start + len(master_samples) / SAMPLE_RATE + pause
             else:
                 pause_samples = np.zeros(round(pause * SAMPLE_RATE), dtype=np.int16)
                 pieces.append(pause_samples)
                 cursor += len(pause_samples) / SAMPLE_RATE
             page['end'] = cursor
             if auto_camera:
-                page['last_drawing_end'] = max(event['end'] for event in page['events'] if not event['caption'])
+                page['last_drawing_end'] = max((event['end'] for event in page['events'] if not event['caption']), default=page['start'])
                 keys = direction.auto_camera(page, self.assets, self.width, self.height, page_index)
                 if keys:
+                    keys = guard_screen_titles(keys, page, page_spec, self.assets, self.work, self.width, self.height)
                     for key in keys:
                         key['center'] = [min(max(key['center'][0], 0.), self.width), min(max(key['center'][1], 0.), self.height)]
                     page['camera'] = keys
@@ -771,7 +900,7 @@ class FilmBuilder:
                             continue  # loops simply stop when the page turns
                         if effect['end'] > cursor + 1e-6:
                             raise ValueError(f'Motion {effect["type"]} on {event["asset"]} runs past the end of its page')
-            page['last_drawing_end'] = max(event['end'] for event in page['events'] if not event['caption'])
+            page['last_drawing_end'] = max((event['end'] for event in page['events'] if not event['caption']), default=page['start'])
             overlays = self.overlay_events(page_spec, page, scale)
             if overlays:
                 page['overlays'] = overlays
@@ -790,7 +919,7 @@ class FilmBuilder:
             pages.append(page)
         ending = self.manifest.get('ending', {})
         fade = float(ending.get('fade_seconds', 0))
-        narration_end = cover_seconds + len(master_samples) / SAMPLE_RATE if master_report else pages[-1]['speech_end']
+        narration_end = voice_start + len(master_samples) / SAMPLE_RATE if master_report else pages[-1]['speech_end']
         hold = pages[-1]['end'] - narration_end
         if not math.isfinite(fade) or not 0 <= fade <= hold:
             raise ValueError('Ending fade must fit entirely after narration')
@@ -804,7 +933,7 @@ class FilmBuilder:
             captions[-1]['hide'] = final_caption_end
             cues[-1]['end'] = final_caption_end
         if master_report:
-            pieces = [pieces[0], master_samples, np.zeros(round(float(options.get('end_hold_seconds', .45)) * SAMPLE_RATE), dtype=np.int16)]
+            pieces = [pieces[0], master_samples, np.zeros(round((float(options.get('end_hold_seconds', .45)) + settle) * SAMPLE_RATE), dtype=np.int16)]
         ending_review = validate_ending(self.manifest, master_samples, SAMPLE_RATE) if master_report and not self.manifest.get('runtime_fixture') else None
         narration = np.concatenate(pieces)
         save_wave(self.work / 'narration.wav', narration)
@@ -816,7 +945,7 @@ class FilmBuilder:
         hand = self.manifest.get('hand', {})
         timeline = {'title': self.manifest['title'], 'source_notes': self.manifest.get('source_notes', []),
                     'canvas': {'width': self.width, 'height': self.height, 'fps': self.fps, **({'aspect_ratio': self.aspect_ratio} if getattr(self, 'aspect_ratio', None) else {})},
-                    'paper': self.manifest.get('paper', '#FBF9F1'), 'cover_seconds': cover_seconds, 'ending': {'fade_seconds': fade, 'caption_hold_seconds': caption_hold},
+                    'paper': self.manifest.get('paper', '#FBF9F1'), 'cover_seconds': cover_seconds, 'voice_start_seconds': voice_start, 'ending': {'fade_seconds': fade, 'caption_hold_seconds': caption_hold, 'settle_seconds': settle},
                     'narration_master': master_report, 'caption_sync': sync,
                     'captions': {'presentation': 'burned', 'owner': 'caption_events'},
                     'audio_policy': resolve_audio_layers(self.root, self.manifest), 'ending_review': ending_review,

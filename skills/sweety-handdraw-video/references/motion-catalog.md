@@ -103,7 +103,7 @@
 
 | recipe | 关键参数 | 用途 |
 |---|---|---|
-| `kinetic_title` | `text`、`keywords`（主色强调）、`style`、size、font（hand、sans、serif）、underline | 开场标题、金句、章节名。style 有六种：<br>• blur_up：模糊上浮，产品站质感<br>• spring_pop：逐字弹出<br>• mask_up：遮罩上推<br>• typewriter：打字机<br>• slam：逐词砸入并震屏，每段最多一次<br>• scramble：乱码收敛成字，适合数字和科技感<br>• word_by_word：逐词出现，关键词先大后缩、挤开邻词 |
+| `kinetic_title` | `text`、`keywords`（主色强调）、`style`、size、font（hand、sans、serif）、underline、badge（标题前的编号圈：条目标题用它，和章节标题分开层级） | 开场标题、金句、章节名。style 有八种：<br>• glyph_in：整字逐个淡入、轻微上浮落定，任何时刻都没有被遮掉半截的字；关键词保留强调色，英文单词和数字整体出现；停下后和 mask_up 的位置一模一样。开场标题首选它<br>• blur_up：模糊上浮，产品站质感<br>• spring_pop：逐字弹出<br>• mask_up：遮罩上推（中途只露出半个字，旧片保留，新片开场用 glyph_in）<br>• typewriter：打字机<br>• slam：逐词砸入并震屏，每段最多一次<br>• scramble：乱码收敛成字，适合数字和科技感<br>• word_by_word：逐词出现，关键词先大后缩、挤开邻词<br>blur_up、mask_up、typewriter、glyph_in 会把逐词（逐字）间隔压进这一层自己的 `seconds` 里，长句在结束前两帧全部落定，不会定格在半模糊上<br>换行：只在词与词之间断（数字连单位、人名连“·”、标点不落到行首）；要换行时两行尽量等长，优先断在逗号、问号后，末行不会只剩“哪一条？”这样的短词 |
 | `rough_annotate` | type（circle、box、underline、highlight、strike-through、crossed-off、bracket） | 在已画好的元素上画圈、划线 |
 | `sketch_shapes` | shapes：arrow、curve_arrow、line、rect、ellipse、polygon、check、cross、bracket、star；`flow` 为流动虚线 | 手绘箭头、勾叉、流向 |
 | `callout` | text、tail | 弹出的手绘气泡或标签 |
@@ -116,7 +116,14 @@
 | `physics` | scene：pour（倒入，默认）、topple（多米诺）、stack（球撞倒一摞方块）、bounce（弹跳）；container：jar、tray、floor、none；items：[{shape：circle、box、pill，size 或 w/h，fill，label，count}]；gravity；drop_ms | 真实物理（matter-js）："钱越攒越多"、"一个倒下全部倒下"、"一推就塌"。每个物体保持一份手绘轮廓，跟着刚体转动，不抖线 |
 | `spin3d` | shape：box、coin、cylinder、cone、sphere、pyramid、gem；colors：[主色, 侧面, 顶面]；turns；tilt；axis（y 或 x） | 转动的立体物件（Zdog），有墨线外轮廓和平涂明暗：硬币翻面、产品转一圈、晶体、积木。先带一点过冲弹出，再转 |
 | `formula` | tex（TeX）；size（每 em 像素，默认撑满框）；color；glyph_ms；highlight：{from, to（字形序号），style：circle、box、underline} | 手写公式（MathJax）：每个字形先描轮廓再填实，按书写顺序走，分数线先于分母，根号先于根式里的内容。写完可以圈出一部分。TeX 写错时 `build` 直接报错 |
-| `custom` | html、css、script（可用 anime、rough、RoughNotation、confetti、d3） | 以上都不够时由模型现写。动画必须由 anime.js、CSS 或 element.animate 驱动（都受虚拟时钟控制），背景保持透明 |
+| `roadmap` | groups：[{label, count, numbers（可选：这一组自己的条目编号）}]；done（已完成条数）；current（这一条的序号，从 0 起）；active（[起, 止) 一起点亮的一段，整组讲时用）；focus（点亮的组）；mode：full（章节卡、开场地图）或 strip（每条页面顶部的进度条，可加 caption）；enter: "settled"（只用于 strip：翻页后第一帧整条已在，只有本页这一条（组）点亮、caption 出现；第一页用默认的逐点弹出，之后各页用 settled，进度条跨页“停”在原处，不再每页从白纸长出来） | 长清单的结构与进度：观众知道在哪一章、第几条、还剩几条 |
+| `table` | columns；rows（单元格写“✓”“✗”会画成勾叉）；widths；row_ms（每行出现的时刻）；highlight：[{row, col, ms}] | 对比与取舍：逐行写出，关键格打底色 |
+| `flow` | nodes：[{id, text, at:[x,y] 0–1, size:[w,h], shape：round、box、circle, ms}]；edges：[{from, to, text, ms, bend, dashed}]；tokens：[{path:[id…], ms, edge_ms, loop}]；shake：[{id, ms, mark}] | 流程、循环、因果树、架构：方框依次画出，一个点沿箭头跑；冲突处抖动打叉 |
+| `swimlane` | lanes：[{label}]；blocks：[{lane, from, to, text, kind：work 或 wait}]；span；sweep_ms；title | 谁在做、谁在等：同步与异步、批量交代 |
+| `checklist` | items：[{text, ms, mark：check、cross、strike, mark_ms}]；columns | 列举：逐项写出，说到时打勾、打叉、划掉 |
+| `cards` | count、columns、card_ms；flicker：{indices, step_ms, ms, question}；groups：[{indices, label, x, ms}]；highlight | 很多个：版本、并行 Agent、十次运行；错误标记跳动、分成对照组 |
+| `pulse` | beats：[{ms, label}]；sweep_ms | 定时、心跳、周期任务 |
+| `custom` | html、css、script（可用 anime、rough、RoughNotation、confetti、d3），element、explains，moments | 以上都不够时由模型现写。动画必须由 anime.js、CSS 或 element.animate 驱动（都受虚拟时钟控制），背景保持透明。写明 element（画的是什么）和 explains（讲清什么机制），才算一种讲解形式；`moments` 列出它新出现东西的时刻（毫秒，从图层开始算），画面节奏检查据此知道“这几秒在动”。 |
 
 `rough_chart` 的六种 kind：
 

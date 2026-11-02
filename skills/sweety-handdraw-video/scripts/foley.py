@@ -53,7 +53,8 @@ HAND_TOOLS = {'navy': 'marker', 'pen-only': 'marker', 'diamond-woman': 'marker',
               'waner-brush': 'brush', 'teacher-pen': 'pen', 'cardigan-fountain': 'pen'}
 # Segment kind -> (voice, level, reference nib speed in px/s on a 1080 px short side, brightness offset, tick share)
 KINDS = {'ink': ('nib', 1., 700., 0., 1.), 'sketch': ('nib', .45, 600., .2, .5),
-         'color': ('rub', .8, 1400., 0., .35), 'shade': ('rub', .5, 900., -.2, .25), 'brush': ('rub', .75, 1200., .1, .35)}
+         'color': ('rub', .8, 1400., 0., .35), 'shade': ('rub', .5, 900., -.2, .25), 'brush': ('rub', .75, 1200., .1, .35),
+         'erase': ('rub', .55, 1600., .35, .3)}
 SILENT_KINDS = {'travel', 'pause'}
 VOICES = ('nib', 'text', 'rub')
 TEXT_SHIFT, TEXT_GRAIN = .85, .8  # handwriting: the same nib a little lower and smoother, a soft pencil-on-paper whisper

@@ -94,12 +94,24 @@ class DrawEngineTests(unittest.TestCase):
         source = self.directory / 'printer-source.png'
         large.resize((280, 320), Image.Resampling.LANCZOS).save(source)
         halves = [{'id': 'body', 'polygon': [[0, 0], [1, 0], [1, .5], [0, .5]]}, {'id': 'paper', 'polygon': [[0, .5], [1, .5], [1, 1], [0, 1]]}]
-        stroke_assets.build_illustration('printer', source, 280, 320, parts=halves, seconds=8)
+        # The even technical pen of 2.x (drawing.texture false): the finished picture is the source.
+        stroke_assets.build_illustration('printer', source, 280, 320, parts=halves, seconds=8, drawing={'texture': False})
         expected = np.array(stroke_assets.prepare_artwork(source, 280, 320)['artwork']).astype(int)
         final = np.array(Image.open(self.directory / 'printer.png')).astype(int)
         on_paper = lambda pixels: pixels[:, :, :3] * pixels[:, :, 3:] / 255 + 250 * (1 - pixels[:, :, 3:] / 255)
         wrong = np.abs(on_paper(final) - on_paper(expected)).max(axis=2) > 40
         self.assertLess(wrong.sum(), .005 * (expected[:, :, 3] > 0).sum())
+        # Pressure ink (the default) only reshapes the source's own ink: free ends taper, the body thins a little, the ink
+        # is a little lighter in places. It never adds ink, the line's core stays where the source has it (the line stays
+        # registered), and the picture moves by a small mean colour difference (CIE76; measured ~5.5 on these bare lines).
+        stroke_assets.build_illustration('pressed', source, 280, 320, parts=halves, seconds=8)
+        pressed = np.array(Image.open(self.directory / 'pressed.png')).astype(int)
+        ink = expected[:, :, 3] > 0
+        self.assertFalse((pressed[:, :, 3] > final[:, :, 3] + 2).any())
+        from scipy import ndimage
+        core = ndimage.distance_transform_edt(expected[:, :, 3] > 127) >= 2
+        self.assertGreater(np.count_nonzero((pressed[:, :, 3] >= 128) & core) / core.sum(), .99)
+        self.assertLess(float(illustration_layers.delta_e(pressed, expected)[ink].mean()), 8.)
 
     def test_human_likeness_metrics_on_clean_drawing(self):
         source = self.directory / 'figure.png'

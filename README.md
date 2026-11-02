@@ -8,7 +8,7 @@ Agent 负责理解内容、写口播、设计分镜和生成插画；本地工�
 
 [看有声样片](#精选样片) · [安装与环境](#安装与环境) · [开始制作](#开始制作) · [全部制作选项](#全部制作选项) · [常见问题](#常见问题) · [关注作者](https://x.com/leo_xiaolei)
 
-> **当前版本：v2.0.2（2026-10-28）**。笔不会再在画面外写字：每个正在写、正在画的元素和板上动效出场的过程都会检查，镜头等笔、补一个取景或拉远一点，挑整页最好的那个；句尾不再有杂音或被截断，按最后一个字后的静音定结尾并淡出；同一位置的两条大标题不再被连读成一句。详见 [v2.0.2 发布记录](docs/releases/v2.0.2.md)。v2.0.1 是 2.0 的第一个公开版本，新增视差与希区柯克变焦、真实物理道具、转动的立体物件、手写公式、压感箭头和转场音效；画多大不再决定画多久，生图后几秒内自检，部位可以写方框，改镜头不用重画，自动镜头不再切掉标题，动效出现时笔尖先描。2.0 的主体：上色像人：先描边再斜向排笔、湿笔触后干透，不再按部件方框一块块出现；镜头有了名字和节奏（推、拉、横移、hop、甩、砸入，对数缩放、到位震动），自动导演每页换一种拿图方式；转场扩到 22 种，翻页四个方向、撕纸、毛刷、墨晕、墨渍光圈、橡皮擦、立方体、拼砖、碎片；网页动效层可做大字砸入与乱码收敛、手绘图表、转动地球上的航线和形状接力；给模型的[运镜、转场与动效目录](skills/sweety-handdraw-video/references/motion-catalog.md)。详见 [v2.0.1 发布记录](docs/releases/v2.0.1.md) 与 [v2.0.0 记录](docs/releases/v2.0.0.md)，v1.5 见[其发布记录](docs/releases/v1.5.0.md)。以包内 `VERSION` 和 Git 标签为准。
+> **当前版本：v3.0.0（2026-11-02）**。手绘线的收官版本：先出线稿再上色，笔先起形、按模块描线、用橡皮擦掉起形，再拿马克笔由浅到深上色，墨线有压感、马克笔有叠色；水印每页自动避开画面，旁白在封面渐隐时就开口，框里的字按词断行，讲解形式（清单、表格、流程、地图、公式、机制动画）按口播的字出现；一部片只写数据，不再手写脚本（制作工具包）。详见 [v3.0.0 发布记录](docs/releases/v3.0.0.md)；3.0.0 的进展和本版修复的问题见 [#19](https://github.com/threerocks/sweety-handdraw-video/issues/19)。2.0 系列见 [v2.0.2](docs/releases/v2.0.2.md)、[v2.0.1](docs/releases/v2.0.1.md) 与 [v2.0.0](docs/releases/v2.0.0.md) 记录，v1.5 见[其发布记录](docs/releases/v1.5.0.md)。以包内 `VERSION` 和 Git 标签为准。
 
 ## 精选样片
 
@@ -65,7 +65,7 @@ Agent 负责理解内容、写口播、设计分镜和生成插画；本地工�
 - **画风跟随内容**：21 个库内入口，也可让模型独立设计，或提供自定义方向。
 - **声音先行、按段生成**：口播按语义段落生成，每段过嗡声 / 底噪 / 削波门禁，拼接停顿实测，再按时间戳安排画面与字幕。
 - **像人一样画，而且有条理**：只描真实墨线，深色填充不再以噪点提前出现；复杂画面按对象逐个画完，对象内先外轮廓、再从已画线条上"长出"内部线条；马克笔就近之字形上色；无轮廓画风由笔刷按部位揭示；汉字按标准笔顺书写。
-- **先算预算再出图**：分镜按旁白算出每幅画能画几秒、最多几笔（约每秒 5 笔，与图幅基本无关），图按预算设计，不靠压缩时间硬塞；`layout_plan.py` 给出平台安全区版式并实测指定尺寸的最少绘制时间。
+- **先算预算再出图**：分镜按旁白算出每幅画能画几秒、最多几笔（按每幅画的画法算速度：默认起形 + 马克笔约每秒 3.9 笔，按部位上色、不起形约每秒 6 笔，与图幅基本无关），图按预算设计，不靠压缩时间硬塞；`layout_plan.py` 给出平台安全区版式并实测指定尺寸的最少绘制时间。
 - **可以定位修改**：保留脚本、素材、声音、时间戳和检查记录，修字幕不必重新生图。
 - **运行与观感分别检查**：文件能播放、声音清楚、剧情画对，是不同检查项。
 
@@ -98,7 +98,7 @@ Agent 负责理解内容、写口播、设计分镜和生成插画；本地工�
 npx skills add threerocks/sweety-handdraw-video --skill sweety-handdraw-video --agent claude-code codex --global --copy --yes
 ```
 
-安装位置：Claude Code 为 `~/.claude/skills/sweety-handdraw-video`，Codex 为 `~/.agents/skills/sweety-handdraw-video`（该命令写入的通用目录）。只装一个宿主时去掉另一个 `--agent` 值；不加 `--global` 则装进当前项目（Claude Code 为 `.claude/skills/`）。此命令安装仓库当前公开内容。需要固定本版时，使用 [v2.0.2 安装包](https://github.com/threerocks/sweety-handdraw-video/releases/download/v2.0.2/sweety-handdraw-video-v2.0.2.zip)；[全部版本](https://github.com/threerocks/sweety-handdraw-video/releases)。下载同页的 `SHA256SUMS.txt`，执行 `shasum -a 256 -c SHA256SUMS.txt` 校验。更新仓库不会自动更新已安装的副本；替换完整 Skill 目录后，读取其中的 `VERSION`，本版应为 `2.0.2`。
+安装位置：Claude Code 为 `~/.claude/skills/sweety-handdraw-video`，Codex 为 `~/.agents/skills/sweety-handdraw-video`（该命令写入的通用目录）。只装一个宿主时去掉另一个 `--agent` 值；不加 `--global` 则装进当前项目（Claude Code 为 `.claude/skills/`）。此命令安装仓库当前公开内容。需要固定本版时，使用 [v3.0.0 安装包](https://github.com/threerocks/sweety-handdraw-video/releases/download/v3.0.0/sweety-handdraw-video-v3.0.0.zip)；[全部版本](https://github.com/threerocks/sweety-handdraw-video/releases)。下载同页的 `SHA256SUMS.txt`，执行 `shasum -a 256 -c SHA256SUMS.txt` 校验。更新仓库不会自动更新已安装的副本；替换完整 Skill 目录后，读取其中的 `VERSION`，本版应为 `3.0.0`。
 
 手动安装：将包内的 `sweety-handdraw-video` **整个文件夹**放入宿主的 Skills 目录，例如 `~/.claude/skills/sweety-handdraw-video`（Claude Code）或 `~/.codex/skills/sweety-handdraw-video`（Codex）。更新前备份旧目录；仅复制 `SKILL.md` 会缺少脚本、素材和内置依赖。手部、画风预览与试听已随包提供（约 38 MB），装好即可离线使用，不再依赖首次下载。
 
@@ -359,7 +359,7 @@ python3 tools/release.py check
 python3 -m unittest discover -s tools -p 'test*.py' -v
 ```
 
-v2.0.2 的变更、前后对比与验收边界见 [发布记录](docs/releases/v2.0.2.md)；v2.0.1 见[其记录](docs/releases/v2.0.1.md)（包含未公开发布的 [v2.0.0](docs/releases/v2.0.0.md)），v1.5.0 见[其记录](docs/releases/v1.5.0.md)；v1.4.1 新增发布一致性和实际画面范围检查，见 [v1.4.1 记录](docs/releases/v1.4.1.md)。标签触发发布工作流，先完成 macOS / Linux 检查，再从标签提交打包上传 ZIP 与校验文件；稳定标签不移动。
+v3.0.0 的变更、前后对比与验收边界见 [发布记录](docs/releases/v3.0.0.md)；v2.0.2 见[其记录](docs/releases/v2.0.2.md)，v2.0.1 见[其记录](docs/releases/v2.0.1.md)（包含未公开发布的 [v2.0.0](docs/releases/v2.0.0.md)），v1.5.0 见[其记录](docs/releases/v1.5.0.md)；v1.4.1 新增发布一致性和实际画面范围检查，见 [v1.4.1 记录](docs/releases/v1.4.1.md)。标签触发发布工作流，先完成 macOS / Linux 检查，再从标签提交打包上传 ZIP 与校验文件；稳定标签不移动。
 
 v1.3 记录：158 项回归通过（1 项平台用例跳过）、离线冒烟短片通过、安装包 843 个文件、49.4 MB 通过核验；蛇故事以 v1.3 流程端到端重做（揭示模式），软件工具片以修复后的引擎重做（18 幅插画全部逐笔绘制、无淡入，终帧与原图一致）；2026-10-17 增补宽墨线角点覆盖、混音电平、数字比较与填充最短时长修复，并新增配乐自动准备。相应成片工程检查、声音门禁与字幕同步均通过。该结果不能替代视频观感、故事事实、听感或学习效果验收。更多记录见 [验证范围](docs/validation.md)。
 

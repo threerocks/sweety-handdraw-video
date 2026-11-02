@@ -141,6 +141,11 @@ class ProductionOptionsTests(unittest.TestCase):
         alpha = np.array(Image.open(mark['source']))[:, :, 3]
         self.assertGreater(alpha.max(), 0)
         self.assertLessEqual(alpha.max(), 62)
+        # a paper-coloured halo at the same opacity: readable over a dark night picture, invisible on paper
+        rgba = np.array(Image.open(mark['source']))
+        self.assertTrue(((rgba[..., 0] > 200) & (rgba[..., 3] > 0)).any())
+        plain = np.array(Image.open(prepare_watermark({'text': text, 'halo': False}, self.root, 1080, 1920)['source']))
+        self.assertFalse(((plain[..., 0] > 200) & (plain[..., 3] > 0)).any())
         positions = [watermark_position(mark, 1080, 1920, time) for time in range(0, 3600, 11)]
         self.assertGreater(len(set(positions)), 20)
         for x, y in positions:

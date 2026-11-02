@@ -209,6 +209,8 @@ class LayoutMetricsAndCueTests(unittest.TestCase):
         timeline = {'cover_seconds': 1., 'pages': [page]}
         longest, where = visual_metrics.unchanged(timeline)
         self.assertEqual((longest, where), (10., [20., 30.]))  # the camera move at 18 s into the page ends at 20 s
+        page['overlays'] = [{'start': 22., 'end': 23., 'exit': {'start': 26., 'end': 26.5}}]   # a handwritten keyword, then its fade
+        self.assertEqual(visual_metrics.unchanged(timeline), (7., [5., 12.]))
 
     def test_speech_rate_counts_syllables_not_letters(self):
         from align import spoken_syllables, syllables

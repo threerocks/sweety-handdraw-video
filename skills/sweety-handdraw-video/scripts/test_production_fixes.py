@@ -36,15 +36,27 @@ class InkCornerTests(unittest.TestCase):
             draw.line([(25,30),(210,30),(140,120),(210,210),(25,210)], fill='#202020',width=13,joint='curve')
             image.save(root/'source.png')
             mask=image.getchannel('A');mask.save(root/'outline.png')
-            metadata=stroke_assets.build_illustration('corners',root/'source.png',240,240,
-                parts=[{'id':'contour','polygon':[[0,0],[1,0],[1,1],[0,1]]}],outline_mask_path=root/'outline.png',seconds=10)
-            maps=np.load(root/'corners.npz');drawn=np.isfinite(maps['ink'])
-            distances,_=match_reveal_to_tip(metadata,maps['ink'],drawn,{'ink'})
-            self.assertLess(distances.max(),9.)
+            for name,texture in (('corners',False),('pressed',True)):
+                metadata=stroke_assets.build_illustration(name,root/'source.png',240,240,
+                    parts=[{'id':'contour','polygon':[[0,0],[1,0],[1,1],[0,1]]}],outline_mask_path=root/'outline.png',seconds=10,
+                    drawing={'texture':texture})
+                maps=np.load(root/f'{name}.npz');drawn=np.isfinite(maps['ink'])
+                distances,_=match_reveal_to_tip(metadata,maps['ink'],drawn,{'ink'})
+                self.assertLess(distances.max(),9.)
+                self.assertEqual(metadata['drawability']['drawn_stroke_count'],metadata['drawability']['stroke_count'])
             original=np.array(image)[:,:,3]>0
             final=np.array(Image.open(root/'corners.png'))[:,:,3]>0
             self.assertGreater(np.count_nonzero(original & final)/original.sum(),.995)
-            self.assertEqual(metadata['drawability']['drawn_stroke_count'],metadata['drawability']['stroke_count'])
+            # With pressure ink the two free ends of this open line land and lift thin: source pixels may go only there,
+            # within the taper (TAPER_WIDTHS line widths, plus the round tip) of an end; every other one is kept.
+            import line_drawing
+            pressed=np.array(Image.open(root/'pressed.png'))[:,:,3]>0
+            ys,xs=np.nonzero(original)
+            reach=(line_drawing.TAPER_WIDTHS+1)*13
+            near_end=np.minimum(np.hypot(xs-25,ys-30),np.hypot(xs-25,ys-210))<=reach
+            kept=pressed[ys,xs]
+            self.assertGreater(kept[~near_end].mean(),.995)
+            self.assertGreater(kept[near_end].mean(),.6)
 
     def test_adjacent_parts_use_their_nib_time_and_owner_together(self):
         points = np.c_[np.arange(15, 50), np.full(35, 20)]

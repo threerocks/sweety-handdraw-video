@@ -110,7 +110,8 @@ def validate_cover(renderer):
         if not np.array_equal(np.array(renderer.frame(moment)),original):
             raise ValueError('Cover moves or fades during its first half second')
     for moment in (.6,.75,.9):
-        expected=np.array(Image.blend(renderer.cover,Image.new('RGBA',renderer.cover.size,renderer.paper),(moment-.5)/.5).convert('RGB'))
+        under=renderer.under_cover(moment) if hasattr(renderer,'under_cover') else Image.new('RGBA',renderer.cover.size,renderer.paper)
+        expected=np.array(Image.blend(renderer.cover,under,(moment-.5)/.5).convert('RGB'))
         if not np.array_equal(np.array(renderer.frame(moment)),expected):
-            raise ValueError('Cover does not fade smoothly to paper in its last half second')
+            raise ValueError('Cover does not fade smoothly into the opening in its last half second')
     return True

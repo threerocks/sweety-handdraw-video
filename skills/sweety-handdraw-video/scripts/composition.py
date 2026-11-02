@@ -202,6 +202,21 @@ def measure_pages(root, timeline, board, fixture=False):
             if is_picture:
                 picture_mask = ImageChops.lighter(picture_mask, placed)
                 pictures += 1
+        # Explanation forms drawn by web motion are page content too (a prism, a commit graph, a table): their last frame
+        # counts, so a page explained by an animation is not reported as empty. Titles and the progress strip do not.
+        for overlay in page.get('overlays', []):
+            if overlay.get('recipe') in ('kinetic_title', 'roadmap', 'burst') or not overlay.get('frames'):
+                continue
+            frames = sorted(Path(overlay['frames']).glob('*.png'))
+            if not frames:
+                continue
+            with Image.open(frames[-1]) as image:
+                alpha = np.array(image.convert('RGBA'))[:, :, 3] > 24
+            layer = Image.fromarray((alpha * 255).astype(np.uint8)).resize(
+                (max(1, round(overlay['width'] * scale)), max(1, round(overlay['height'] * scale))), Image.Resampling.NEAREST)
+            placed = Image.new('L', content_mask.size)
+            placed.paste(layer, (round(overlay['x'] * scale), round(overlay['y'] * scale)))
+            content_mask = ImageChops.lighter(content_mask, placed)
         extent, picture_extent = extent_ratio(content_mask), extent_ratio(picture_mask)
         beat_ids = {beat['id'] for beat in page.get('beats', [])}
         page_shots = [shot for shot in shots if beat_ids.intersection(shot.get('beats', []))]

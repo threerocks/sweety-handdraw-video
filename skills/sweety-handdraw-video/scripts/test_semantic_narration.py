@@ -86,6 +86,24 @@ class SemanticNarrationTests(unittest.TestCase):
         for shift in (.5, -.5):
             self.assertEqual(caption_sync(samples, [{**cue, 'start': cue['start'] + shift, 'end': cue['end'] + shift} for cue in cues])['status'], 'FAIL')
 
+    def test_a_caption_gap_the_voice_speaks_through_is_closed_without_moving_starts(self):
+        from align import close_fluent_gaps
+        from scipy import signal
+        from test_audio_gate import BAND
+        rng = np.random.default_rng(1)
+        parts = []
+        for speech, pause in [(.3, .4), (1.5, .04), (1.5, .4), (1., .3)]:   # a 40 ms dip inside speech, then a real pause
+            time = np.arange(round(speech * SAMPLE_RATE)) / SAMPLE_RATE
+            parts += [signal.sosfilt(BAND, rng.standard_normal(len(time))) * (.6 + .4 * np.sin(np.pi * 4 * time) ** 2), np.zeros(round(pause * SAMPLE_RATE))]
+        samples = np.concatenate(parts)
+        samples = .5 * samples / np.abs(samples).max() + 10 ** (-70 / 20) * rng.standard_normal(len(samples))
+        # ASR gaps of 0.2 s over the dip (2.2-2.24 s) and over the pause (3.74-4.14 s)
+        ranges = [(.7, 2.04), (2.24, 3.94), (4.14, 5.14)]
+        closed = close_fluent_gaps(samples, ranges)
+        self.assertEqual([start for start, _ in closed], [start for start, _ in ranges])
+        self.assertEqual(closed[0][1], 2.24)   # the dip is not a pause: the first caption runs on
+        self.assertEqual(closed[1][1], 3.94)   # the real pause keeps its gap
+
     def test_engine_timestamps_and_pause_split_place_cues(self):
         samples = speech_like([(1.2, .4), (2., .4), (1., .3)])
         ranges, method = pause_split(samples, [6, 10, 5])

@@ -1,6 +1,7 @@
 """Typeset quiet subtitles independently of the hand-drawn artwork font.
 
-Lines and cues break between words: never inside a Latin word, a number with its unit or a keyword, never before
+Lines and cues break between words: never inside a Latin word, a number with its unit, a keyword or a name joined by
+a middle dot (托尔斯滕·鲍尔), never before
 closing punctuation or a particle, never after an opening bracket (kinsoku); clause punctuation is the preferred break,
 then particles (after) and conjunctions/prepositions (before); two-line captions are balanced. English breaks only at
 spaces. jieba refines Chinese word boundaries when it is installed; the built-in rules work without it.
@@ -24,6 +25,7 @@ USE_JIEBA = True
 INF = math.inf
 NO_START = set('，。、；：！？）」』】》〉”’…·—～%‰,.;:!?)]}>')
 NO_END = set('（「『【《〈“‘([{<')
+NAME_JOINERS = set('·・‧')
 CLOSERS = set('）」』】》〉”’)]}')
 CLAUSE_END = set('，。、；：！？…,;:!?')
 SENTENCE_END = set('。！？!?…')
@@ -272,6 +274,36 @@ def number_spans(text):
     return merged
 
 
+def name_spans(text):
+    """(start, end) of names joined by a middle dot (托尔斯滕·鲍尔, 马丁·路德·金): a line or cue never breaks inside one.
+    A part is the Latin word or number next to the dot, or two to four Chinese characters: before the dot the longest
+    such jieba word run (jieba cuts unknown names short: 托尔斯|滕), after it the shortest (鲍尔|今年); four without jieba."""
+    if not any(dot in text for dot in NAME_JOINERS):
+        return []
+    edges = _jieba_edges(text)
+    edges = None if edges is None else edges | {0, len(text)}
+    spans = []
+    for dot, character in enumerate(text):
+        if character not in NAME_JOINERS or not 0 < dot < len(text) - 1:
+            continue
+        left, right = text[dot - 1], text[dot + 1]
+        if {_kind(left), _kind(right)} - {'h', 'a'}:  # "说明文件 · 技能": a spaced dot separates, it does not join
+            continue
+        start, end = dot - 1, dot + 2
+        while start > 0 and _kind(text[start - 1]) == _kind(left) and text[start - 1] not in NAME_JOINERS:
+            start -= 1
+        while end < len(text) and _kind(text[end]) == _kind(right) and text[end] not in NAME_JOINERS:
+            end += 1
+        if _kind(left) == 'h':
+            choices = [edge for edge in (edges or ()) if 2 <= dot - edge <= 4 and edge >= start]
+            start = min(choices) if choices else max(start, dot - 4)
+        if _kind(right) == 'h':
+            choices = [edge for edge in (edges or ()) if 2 <= edge - dot - 1 <= 4 and edge <= end]
+            end = min(choices) if choices else min(end, dot + 5)
+        spans.append((start, end))
+    return spans
+
+
 def keyword_spans(text, keywords):
     """Non-overlapping occurrences of the keywords, longest first."""
     taken = []
@@ -286,7 +318,7 @@ def break_costs(text, keywords=()):
     """Cost of a line/cue break before text[i] (index 1..len-1; INF = never). Lower is a better break."""
     count = len(text)
     costs, plain = [INF] * (count + 1), [False] * (count + 1)
-    atoms = number_spans(text) + keyword_spans(text, keywords)
+    atoms = number_spans(text) + keyword_spans(text, keywords) + name_spans(text)
     locked = {index for start, end in atoms for index in range(start + 1, end)}
     if is_latin(text):
         for index in range(1, count):
@@ -526,13 +558,27 @@ def split_text(text, limit, width_of=display_units, max_parts=None, strip=True, 
             if sum(widths[start:end]) > limit:
                 for index in range(start + 1, end):
                     if text[index] not in NO_START and not text[index].isspace():
-                        relaxed[index] = 200.
+                        relaxed[index] = 150. if text[index - 1] in NAME_JOINERS else 200.  # a name too long: after its dot
         segments = _segments(text, widths, relaxed, limit, strip, max_parts)
     if segments is None:  # max_parts too few for whole words: break inside one rather than before punctuation
         relaxed = [cost if cost < INF else 200. if 0 < index < len(text) and text[index] not in NO_START
                    and not text[index].isspace() else INF for index, cost in enumerate(costs)]
         segments = _segments(text, widths, relaxed, limit, strip, max_parts)
     return None if segments is None else [text[start:end] for start, end in segments]
+
+
+def character_wrap(text, fits, kinsoku=True):
+    """Last-resort wrap, one character at a time while fits(line); with kinsoku a line never starts with closing
+    punctuation (，。？）…): the character before it goes down with it."""
+    lines, current = [], ''
+    for character in text:
+        if character == '\n' or (current and not fits(current + character)):
+            carry = current[-1] if kinsoku and character in NO_START and len(current) > 1 and current[-1] not in NO_START else ''
+            lines.append(current[:len(current) - len(carry)])
+            current = carry
+        if character != '\n':
+            current += character
+    return lines + [current] if current else lines
 
 
 def caption_lines(text, width_of, limit, max_lines=None, strip=True, keywords=()):
@@ -650,15 +696,9 @@ def build_caption(directory, name, text, options, canvas_width, canvas_height, k
         if lines is None or all(font.getlength(line) <= line_limit for line in lines):
             break
     if lines is None or any(font.getlength(line) > line_limit for line in lines):
-        lines, current = [], ''  # the previous character wrap: anything it accepted is still accepted
-        for character in text:
-            if character == '\n' or (current and font.getlength(current + character) > line_limit):
-                lines.append(current)
-                current = ''
-            if character != '\n':
-                current += character
-        if current:
-            lines.append(current)
+        # the previous character wrap: anything it accepted is still accepted; kinsoku when the lines allow it
+        wrapped = [character_wrap(text, lambda line: font.getlength(line) <= line_limit, kinsoku) for kinsoku in (True, False)]
+        lines = wrapped[0] if len(wrapped[0]) <= max_lines else wrapped[1]
     if not lines or len(lines) > max_lines:
         raise ValueError('Split long subtitles into speech-aligned caption_cues')
     margin = 6 + stroke

@@ -9,7 +9,7 @@ import subprocess
 import wave
 import numpy as np
 from PIL import Image, ImageColor, ImageFilter
-from watermark_assets import watermark_position
+from watermark_assets import planned_watermark, watermark_position
 from motion_profile import distance_fraction
 import illustration_layers
 
@@ -42,6 +42,8 @@ def lifted_move(origin,destination,fraction,height=10.):
 def asset_tip(metadata,progress,starts=None):
     """Pen tip on an asset at normalized progress, plus how far the pen is lifted off the paper."""
     segments=metadata['segments']
+    if not segments:  # a mark too small to trace: the pen touches its centre
+        return np.array([metadata.get('width',0)/2,metadata.get('height',0)/2],dtype=float),0.
     starts=starts if starts is not None else [segment['start'] for segment in segments]
     index=bisect.bisect_right(starts,progress)-1
     if index<0:
@@ -64,6 +66,35 @@ def asset_tip(metadata,progress,starts=None):
 
 def point_on_asset(metadata,progress):
     return asset_tip(metadata,progress)[0]
+
+
+ERASER_SIZE = (.028, .058)  # block eraser width and length, as shares of the frame height
+ERASER_TILT = 28.           # degrees the top leans right, as a right hand holds it to rub
+
+
+def eraser_sprite(height):
+    """(image, contact point, shadow) of a plain block eraser in a paper sleeve, tilted for rubbing; the contact point is the
+    middle of its rubbing end. Drawn at 4x and reduced."""
+    from PIL import ImageDraw
+    width, length = (max(8, round(height * share * 4)) for share in ERASER_SIZE)
+    pad = width
+    canvas = Image.new('RGBA', (width + 2 * pad, length + 2 * pad), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(canvas)
+    body = [pad, pad, pad + width, pad + length]
+    draw.rounded_rectangle(body, radius=width // 5, fill=(247, 244, 238, 255), outline=(150, 146, 140, 255), width=max(2, width // 18))
+    sleeve = [pad, pad, pad + width, pad + round(length * .58)]
+    draw.rectangle(sleeve, fill=(52, 104, 178, 255), outline=(36, 74, 130, 255), width=max(2, width // 18))
+    band = pad + round(length * .5)
+    draw.rectangle([pad, band, pad + width, band + max(2, length // 28)], fill=(240, 240, 236, 255))
+    image = canvas.rotate(-ERASER_TILT, Image.Resampling.BICUBIC, expand=True)
+    turn = math.radians(ERASER_TILT)
+    center = np.array(canvas.size) / 2
+    tip = np.array([pad + width / 2, pad + length]) - center
+    contact = np.array([tip[0] * math.cos(turn) - tip[1] * math.sin(turn), tip[0] * math.sin(turn) + tip[1] * math.cos(turn)]) + np.array(image.size) / 2
+    image = image.resize((max(1, image.width // 4), max(1, image.height // 4)), Image.Resampling.LANCZOS)
+    shadow = Image.new('RGBA', image.size, (24, 22, 20, 0))
+    shadow.putalpha(image.getchannel('A').filter(ImageFilter.GaussianBlur(max(1, height * .003))).point(lambda value: round(value * SHADOW_OPACITY)))
+    return image, contact / 4, shadow
 
 
 def bezier(origin,control,destination,fraction):
@@ -109,6 +140,8 @@ class Renderer:
         self.hand=hand.resize((round(hand.width*scale),round(hand.height*scale)),Image.Resampling.LANCZOS)
         self.nib=np.array(self.timeline['hand']['nib'])*scale
         self.watermark = Image.open(self.timeline['watermark']['source']).convert('RGBA') if self.timeline.get('watermark') else None
+        plan=self.work/'watermark-plan.json'
+        self.watermark_plan=json.loads(plan.read_text()) if self.watermark is not None and plan.is_file() else None
 
     def scale(self,index):
         """Board resolution of a page relative to the screen: >1 when its camera zooms in, so a close-up stays sharp."""
@@ -222,12 +255,33 @@ class Renderer:
             squeeze=min(1.,gap/(leave+enter))
             leave,enter=leave*squeeze,enter*squeeze
         elif following and not previous:
-            enter=float(np.clip(following[0]['start']-self.timeline['cover_seconds'],.15,enter))
+            enter=float(np.clip(following[0]['start']-self.voice_start(),.15,enter))
         if previous and time<previous[0]['end']+leave:
             return (*self.offstage(self.event_tip(previous[0],1),(time-previous[0]['end'])/leave,True),previous[1])
         if following and following[0]['start']-time<enter:
             return (*self.offstage(self.event_tip(following[0],0),1-(following[0]['start']-time)/enter,False),following[1])
         return None
+
+    def pen_kind(self,time):
+        """Kind of the segment the pen is on now ('erase' while it rubs the construction out), or None."""
+        events=self.pen_events()
+        index=bisect.bisect_right(self.pen_event_starts,time)-1
+        if index<0:
+            return None
+        event=events[index][0]
+        if time>event['end'] or event.get('gesture') or event.get('asset') not in self.timeline['assets']:
+            return None
+        metadata=self.timeline['assets'][event['asset']]
+        segments=metadata.get('segments') or []
+        cache=self.__dict__.setdefault('segment_starts',{})
+        if event['asset'] not in cache:
+            cache[event['asset']]=[segment['start'] for segment in segments]
+        progress=(time-event['start'])/max(1e-9,event['end']-event['start'])
+        found=max(0,bisect.bisect_right(cache[event['asset']],progress)-1)
+        # Moving between strokes the hand already carries the tool of the next stroke.
+        while found<len(segments) and segments[found]['kind'] in ('travel','pause','slide'):
+            found+=1
+        return segments[found]['kind'] if found<len(segments) else None
 
     def pen(self,page,time):
         state=self.pen_state(time)
@@ -319,6 +373,17 @@ class Renderer:
         if state is None or (page is not None and state[2]!=page):
             return
         point,lift,_=state
+        if self.pen_kind(time)=='erase':
+            # The hand puts the pen down for an eraser while it rubs the construction lines out.
+            key=round(self.height*scale)
+            sprites=self.__dict__.setdefault('eraser_sprites',{})
+            if key not in sprites:
+                sprites[key]=eraser_sprite(self.height*scale)
+            eraser,contact,eraser_shadow=sprites[key]
+            corner=np.rint(point*scale-contact).astype(int)
+            frame.alpha_composite(eraser_shadow,tuple(corner+np.rint(np.array([4.,6.])*scale).astype(int)))
+            frame.alpha_composite(eraser,tuple(corner))
+            return
         hand,shadow,nib,pad,_=self.hand_pose(self.hand_angle(time,point),scale)
         corner=np.rint(point*scale-nib).astype(int)
         # The shadow stays on the paper while the pen lifts, so it separates slightly from the hand; a bare pen's meets its nib.
@@ -750,12 +815,20 @@ class Renderer:
                 return self.blend(target,window,time)
         return self.view(index,time)
 
+    def voice_start(self):
+        return float(self.timeline.get('voice_start_seconds',self.timeline['cover_seconds']))
+
+    def under_cover(self,time):
+        """What the cover fades into: blank paper, or the first page once the voice has started under the fade."""
+        if time>=self.voice_start() and self.timeline.get('pages'):
+            return self.scene(0,time).convert('RGBA')
+        return Image.new('RGBA',(self.width,self.height),self.paper)
+
     def frame(self,time):
         if time<self.timeline['cover_seconds']:
             frame=self.cover.copy()
             if time>.5:
-                canvas=Image.new('RGBA',(self.width,self.height),self.paper)
-                frame=Image.blend(frame,canvas,(time-.5)/.5)
+                frame=Image.blend(frame,self.under_cover(time),(time-.5)/.5)
             return frame.convert('RGB')
         index=min(len(self.starts)-1,max(0,bisect.bisect_right(self.starts,time)-1))
         page=self.timeline['pages'][index]
@@ -765,7 +838,17 @@ class Renderer:
         if index == len(self.starts) - 1 and fade > 0 and remaining < fade:
             frame = Image.blend(frame, Image.new('RGBA', frame.size, self.paper), ease(1 - remaining / fade))
         if getattr(self, 'watermark', None) is not None and time >= self.timeline['watermark']['start_seconds']:
-            frame.alpha_composite(self.watermark, watermark_position(self.timeline['watermark'], self.width, self.height, time))
+            plan=getattr(self,'watermark_plan',None)
+            if plan and len(plan['pages'])==len(self.timeline['pages']):
+                position,alpha=planned_watermark(plan,self.timeline['watermark'],self.width,self.height,time)
+                if alpha>=.999:
+                    frame.alpha_composite(self.watermark,position)
+                elif alpha>0:
+                    sprite=self.watermark.copy()
+                    sprite.putalpha(sprite.getchannel('A').point(lambda value:round(value*alpha)))
+                    frame.alpha_composite(sprite,position)
+            else:
+                frame.alpha_composite(self.watermark, watermark_position(self.timeline['watermark'], self.width, self.height, time))
         return frame.convert('RGB')
 
 
@@ -925,6 +1008,13 @@ def render_job(job_directory,start=0.,duration=None,preview=False):
     validate_timeline(renderer.timeline)
     validate_cover(renderer)
     export_storyboard(renderer)
+    plan=renderer.watermark_plan=None
+    if renderer.watermark is not None and renderer.timeline['watermark'].get('position','legacy')!='legacy':
+        from watermark_assets import plan_watermark
+        plan=renderer.watermark_plan=plan_watermark(renderer)
+        print('WATERMARK',plan['status'],'worst corner ink',plan['worst_busy'],[entry['anchor'] for entry in plan['pages']],flush=True)
+    else:
+        (renderer.work/'watermark-plan.json').unlink(missing_ok=True)
     mix_audio(renderer.root,renderer.timeline)
     path=renderer.work/'review'/'preview.mp4' if preview else renderer.output/'film.mp4'
     if not preview and (start or duration is not None):

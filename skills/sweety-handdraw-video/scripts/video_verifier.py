@@ -29,6 +29,8 @@ def build_fingerprint(root):
              root / 'work' / 'audio-mix-report.json', root / 'outputs' / 'cover.png', Path(timeline['hand']['source'])]
     if timeline.get('watermark'):
         paths.append(Path(timeline['watermark']['source']))
+        if (root / 'work' / 'watermark-plan.json').is_file():
+            paths.append(root / 'work' / 'watermark-plan.json')
     manifest = json.loads((root / 'job.json').read_text())
     if manifest.get('art_direction',{}).get('record'):
         paths.append(root/manifest['art_direction']['record'])
@@ -130,10 +132,13 @@ def verify_assets(root, timeline):
             require(revealed or max(part['outline_end'] for part in parts)<=min(part['fill_start'] for part in parts)+1e-6,
                     f'{name}: filling starts before all outlines are complete')
             # A stroke belongs wholly to one part (ink_owner); paint follows the pixel's part.
+            # Markers colour by colour across the parts (one pen in hand until its colour is done), so fill intervals of
+            # parts overlap by design; each part's paint still stays inside its own interval.
+            by_marker = metadata.get('colouring') == 'markers'
             for phase,channel,owners in [('fill','color',maps['owners'])] if revealed else [('outline','ink',maps['ink_owner']),('fill','color',maps['owners'])]:
                 previous_end=0.
                 for index,part in enumerate(parts):
-                    require(part[phase+'_start']>=previous_end-1e-6,f'{name}: semantic part order is broken')
+                    require((phase == 'fill' and by_marker) or part[phase+'_start']>=previous_end-1e-6,f'{name}: semantic part order is broken')
                     previous_end=part[phase+'_end']
                     times=maps[channel][(owners==index)&np.isfinite(maps[channel])]
                     if times.size:
@@ -151,8 +156,9 @@ def verify_assets(root, timeline):
             if painted.any():
                 distances, radii = match_reveal_to_tip(metadata, maps['color'], painted, {'color'})
                 require(np.isfinite(distances).all() and (radii > 0).all(), f'{name}: unpainted color pixels')
-                # Rendered larger than planned: each coarse paint pixel became a block of fine ones, up to ~2 px wider.
-                slack = .04 + (3. * float(metadata['render_scale']) if metadata.get('render_scale') else 0.)
+                # Rendered larger than planned: each coarse paint pixel became a block of fine ones, up to ~2 px wider, and an
+                # edge pixel may take a neighbouring coarse pixel's time so colour edges follow the picture (guided_index).
+                slack = .04 + ((3. + 2 ** .5) * float(metadata['render_scale']) if metadata.get('render_scale') else 0.)
                 require((distances <= radii + slack).all(), f'{name}: color outside the active brush')
                 entry['paint_max_overshoot_px'] = float((distances - radii).max())
         else:
@@ -252,7 +258,7 @@ def verify_job(job_directory, assets_only=False):
     require(audio_correlation > .99, 'Encoded audio differs from the intended narration mix')
     tail = timeline.get('ending_review')
     if tail:
-        last_voice = round((timeline['cover_seconds'] + tail['last_active_seconds'])*48000)
+        last_voice = round((float(timeline.get('voice_start_seconds', timeline['cover_seconds'])) + tail['last_active_seconds'])*48000)
         tail_start = max(0,last_voice-2*48000)
         tail_correlation = float(np.corrcoef(expected_audio[tail_start:last_voice],encoded_audio[tail_start:last_voice])[0,1])
         require(tail_correlation > .98, 'Encoding changed or cut the final spoken phrase')
@@ -263,6 +269,16 @@ def verify_job(job_directory, assets_only=False):
         (work / 'verification.json').write_text(json.dumps({**report, 'status': 'audio_failed'}, ensure_ascii=False, indent=2))
         require(False, 'Film audio failed: ' + json.dumps({'gate': report['audio_gate'].get('failures'), 'late_captions': report['caption_sync'].get('outside_tolerance')}, ensure_ascii=False))
     report['loudness'] = json.loads(match.group())
+    mark = timeline.get('watermark') or {}
+    if mark and mark.get('position', 'legacy') != 'legacy':
+        plan_path = work / 'watermark-plan.json'
+        require(plan_path.is_file(), 'Watermark placement plan is missing; render again')
+        plan = json.loads(plan_path.read_text())
+        report['watermark'] = {'status': plan['status'], 'worst_busy': plan['worst_busy'],
+                               'anchors': [entry['anchor'] for entry in plan['pages']]}
+        busy = [f"page {entry['page'] + 1}: {entry['busy']:.1%}" for entry in plan['pages'] if entry['busy'] > .06]
+        require(plan['status'] != 'FAIL', 'Watermark covers ink in every corner (' + ', '.join(busy) +
+                '); free one corner of those pages (layout_plan zones lists the watermark corners)')
     require(-20 < float(report['loudness']['input_i']) < -14, 'Loudness outside expected narration range')
     require(float(report['loudness']['input_tp']) < -1, 'True peak too high')
     sample_times = [0] + [page['speech_end'] - .2 for page in timeline['pages']]

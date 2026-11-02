@@ -88,6 +88,14 @@ def verify_art_direction(root, manifest):
     if not reference:
         raise ValueError('All images require an art_direction.record before build')
     count=check_record(root/reference,image_inputs(manifest,root),dependency_hash,style_review['resolved_sha256'])
+    # A serious, adult film's prompts must not ask the image model for baby-schema features (style_fit.CUTE).
+    import style_fit
+    record=json.loads((root/reference).read_text())
+    resolved=json.loads((root/'style/resolved.json').read_text())
+    prompts=[(entry.get('prompt_file'),((root/reference).parent/entry['prompt_file']).read_text()) for entry in record['images'] if entry.get('prompt_file')]
+    cute=style_fit.check_prompts(resolved,prompts)
+    if cute:
+        raise ValueError('Image prompts ask for childlike features in an adult film: '+', '.join(f'{name} ({word})' for name,word in cute))
     hand=manifest.get('hand',{})
     if not hand.get('source'):
         catalog=json.loads((PACKAGE/'assets/hands/catalog.json').read_text())

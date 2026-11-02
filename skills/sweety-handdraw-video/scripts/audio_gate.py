@@ -68,6 +68,60 @@ def tonal_lines(x):
     return lines[:5]
 
 
+VOICE_PAUSE_DROP_DB = 25.   # a line this much quieter in the pauses than in speech is the voice's own pitch, not hum
+DEEP_PAUSE_FRAMES = 8        # 10 ms frames: a pause frame this far from speech holds no ringing of the voice
+MIN_PAUSE_FRAMES = 10        # deep pause frames needed to judge by the pauses; fewer, and the pitch decides
+PITCH_TOLERANCE = .1         # a frame's pitch peak within 10% of a line (or its 2nd, 3rd harmonic) sits on it
+PITCH_SHARE = .25            # a line the voice's pitch peak sits on in this share of voiced frames is the voice
+
+
+def pitch_peaks(x):
+    """The strongest peak between 70 and 400 Hz of each voiced 40 ms frame (the pitch, or one of its harmonics)."""
+    from align import activity
+    active = activity(x, SAMPLE_RATE)
+    hop, width = round(.01 * SAMPLE_RATE), round(.04 * SAMPLE_RATE)
+    frequencies = np.fft.rfftfreq(8192, 1 / SAMPLE_RATE)
+    band = (frequencies >= 70) & (frequencies <= 400)
+    found = []
+    for frame in np.flatnonzero(active)[::4]:
+        window = x[frame * hop:frame * hop + width]
+        if len(window) == width:
+            found.append(frequencies[band][np.argmax(np.abs(np.fft.rfft(window * np.hanning(width), 8192))[band])])
+    return np.array(found)
+
+
+def voice_lines(x, lines):
+    """Split stationary lines into hum and the voice's own pitch. A long list read evenly by a male voice holds its pitch
+    near 120 Hz for seconds, which looks like a stationary line (the v3 film: seven of eight takes of one line failed as
+    “hum at 115-127 Hz”). Hum stays in the pauses; a voice line is gone there (measured >= 80 ms from any speech). A
+    clip with no such pauses is judged by pitch: a line on the speaker's pitch or a harmonic of it is the voice."""
+    if not lines:
+        return [], []
+    from align import activity
+    from scipy import ndimage
+    active = activity(x, SAMPLE_RATE)
+    if not active.any():
+        return lines, []
+    hop = round(.01 * SAMPLE_RATE)
+    first, last = np.flatnonzero(active)[[0, -1]]
+    deep = ~ndimage.binary_dilation(active, iterations=DEEP_PAUSE_FRAMES)
+    deep[:first] = deep[last:] = False
+    pauses, speech = np.flatnonzero(deep), np.flatnonzero(active)
+    peaks = pitch_peaks(x) if len(pauses) < MIN_PAUSE_FRAMES else None
+    hum, voice = [], []
+    for hz, persistence in lines:
+        if len(pauses) >= MIN_PAUSE_FRAMES:
+            low, high = max(1., hz - 8), min(SAMPLE_RATE / 2 - 1, hz + 8)
+            narrow = signal.sosfiltfilt(signal.butter(2, [low, high], btype='band', fs=SAMPLE_RATE, output='sos'), x)
+            level = lambda frames: 20 * np.log10(np.sqrt(np.mean(np.concatenate([narrow[i * hop:(i + 1) * hop] for i in frames]) ** 2)) + 1e-12)
+            is_voice = level(speech) - level(pauses) >= VOICE_PAUSE_DROP_DB
+        else:
+            on_line = [any(abs(peak - k * hz) <= PITCH_TOLERANCE * k * hz for k in (1, 2, 3)) for peak in peaks]
+            is_voice = bool(on_line) and float(np.mean(on_line)) >= PITCH_SHARE
+        (voice if is_voice else hum).append((hz, persistence))
+    return hum, voice
+
+
 def frame_levels(x, frame=.02, hop=.01):
     width, step = round(frame * SAMPLE_RATE), round(hop * SAMPLE_RATE)
     if len(x) < width:
@@ -87,8 +141,10 @@ def measure(source, label=None, short_clip=False):
     if not len(x) or not np.isfinite(x).all() or not np.any(x):
         return {'source': label or str(source), 'status': 'FAIL', 'failures': ['empty, silent or non-finite audio']}
     clipped = float(np.mean(np.abs(x) >= CLIP_LEVEL))
+    hum, voice = voice_lines(x, tonal_lines(x))
     report = {'source': label or (None if isinstance(source, np.ndarray) else str(source)), 'duration_seconds': round(len(x) / SAMPLE_RATE, 3),
-              'tonal_lines_hz_persistence': tonal_lines(x), 'pause_percentile': SHORT_CLIP_PAUSE_PERCENTILE if short_clip else PAUSE_PERCENTILE,
+              'tonal_lines_hz_persistence': hum, **({'voice_pitch_lines': voice} if voice else {}),
+              'pause_percentile': SHORT_CLIP_PAUSE_PERCENTILE if short_clip else PAUSE_PERCENTILE,
               'pause_depth_db': round(pause_depth(x, SHORT_CLIP_PAUSE_PERCENTILE if short_clip else PAUSE_PERCENTILE), 1),
               'dc_offset': round(float(np.mean(x)), 5), 'peak_dbfs': round(float(20 * np.log10(np.abs(x).max())), 2),
               'clipped_fraction': clipped}

@@ -10,7 +10,7 @@ import hashlib
 import json
 from pathlib import Path
 from voice_studio import voice_reference, load_voice_catalog
-from narration_master import build_master
+from narration_master import build_master, probe_terms
 
 MODES = ('combined', 'reference', 'design')
 
@@ -45,7 +45,7 @@ def generation_kwargs(params, text, reference=None, transcript=None):
     return {**kwargs, 'instruct': params['design']}
 
 
-def generate(job):
+def generate(job, probe=False):
     import mlx.core as mx
     import numpy as np
     from mlx_audio.tts.utils import load
@@ -79,6 +79,10 @@ def generate(job):
 
     identity = {'engine': 'voxcpm2-mlx', 'model_path': str(model_path.resolve()), 'voice': options.get('voice'), **params, 'enhancement': enhancement,
                 'reference_sha256': hashlib.sha256(reference.read_bytes()).hexdigest() if reference else None, 'reference_text': transcript}
+    if probe:
+        report = probe_terms(root, manifest, synthesize, options.get('asr', True))
+        print(json.dumps([{key: item[key] for key in ('term', 'status', 'advice') if key in item} for item in report], ensure_ascii=False, indent=1))
+        return
     target, alignment = build_master(root, manifest, synthesize, identity, options)
     print('READY', target, alignment, flush=True)
 
@@ -86,4 +90,6 @@ def generate(job):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('job',type=Path)
-    generate(parser.parse_args().job)
+    parser.add_argument('--probe-terms', action='store_true', help='voice each English word / number in its clause first (work/term-probe)')
+    arguments = parser.parse_args()
+    generate(arguments.job, arguments.probe_terms)

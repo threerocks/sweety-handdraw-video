@@ -16,7 +16,7 @@
   "cover": {"source": "inputs/cover.png", "seconds": 1.0},
   "hand": {"preset": "navy", "pen_text": ""},
   "voice_studio": {"voice": "magnetic-narrator"},
-  "narration": {"source": "inputs/narration/master.wav", "alignment": "inputs/narration/alignment.json"},
+  "narration": {"source": "inputs/narration/master.wav", "alignment": "inputs/narration/alignment.json", "say": {"Grok": "格罗克"}},
   "audio": {"end_hold_seconds": 0.45},
   "pages": [{"beats": [{
     "id": "opening",
@@ -71,17 +71,20 @@
 - 线稿门槛：`python3 scripts/lineart_gate.py SOURCE --width W --height H [--crop ...] [--outline-mask ...]` 测交叉点密度、小闭合孔、碎点和短纹理线占比；构建时同样检查。纹理型线稿（如边缘检测出的布纹）无法一笔一笔画，build 报错。按[可绘制约定](style-and-drawing.md)简化或重新出图。`lineart_exception` 只记录有意保留的纹理，不是出口：笔仍要一笔一笔画完每条短线，通常会超出窗口。
 - 绘制方式：`"drawing": {"mode": "draw" | "reveal"}` 写在 job 顶层，须与 `style/resolved.json` 的 `drawing_mode` 一致；逐笔绘制的片子里单个插画动作不能改用 `reveal`。揭示只由用户选，见[绘制方式](style-and-drawing.md)。`reveal` 不提取线稿、不过线稿门槛，按部位用斜向软笔刷显出成图，元数据 `mode: "reveal"`，`drawability.minimum_seconds` 很小。见[绘制方式](style-and-drawing.md)。
 - 出图检查：`python3 scripts/image_gate.py JOB 图 [--visual id] [--width W]` 在生成后几秒内测透明窟窿、光晕、线稿门槛和规划尺寸下的笔画数与最短秒数，对照故事板给这个视觉的秒数；不过时退出码为 1，并给出 `prompt_fix`（加进提示词的一句话，复杂度超标时写明目标笔画数）。它不改图也不改记录。
-- 规划尺寸：笔画、顺序和时间在长边不超过 720 px 的规划尺寸上计算（`drawing.plan_side`，360—1600），更大的显示尺寸由同一份规划按显示分辨率重新渲染清晰版。所以 `minimum_seconds` 不随显示尺寸增大，图可以按版式需要画大。
+- 规划尺寸：笔画、顺序和时间在长边不超过 720 px 的规划尺寸上计算（`drawing.plan_side`，360—1600），更大的显示尺寸由同一份规划按显示分辨率重新渲染清晰版。所以 `minimum_seconds` 不随显示尺寸增大，图可以按版式需要画大。`plan_side` 作用在版式框上：裁切让图的一部分在同一个框里显示得更大，所以按更高的密度规划，笔画更多（阿姨片开场图只裁左右，最短绘制时间就从 7.9 s 变成 9.1 s），但线条也更不容易挤在一起、过不了线稿检查（阿姨片三张裁切图不裁就过不了）。需要省时间就调低 `plan_side`，别靠取消裁切。
 - 素材缓存：每个绘制元素按内容哈希（动作去掉位置类字段、窗口秒数、画板倍数、输入文件哈希、字体和引擎代码）缓存在 `work/asset-cache/`。只改 `x/y/z/visual/weight/from_beat/motion/pen/depth`、镜头、转场或动效层时，重建直接复用，几秒完成；改了引擎代码、图片或绘制参数会自动重画。
-- `drawing`：job 顶层或 action 内 `{"speed":1.0,"sketch":false}`，action 覆盖顶层。`speed`（0.25—4）缩放人手基准速度及其上限（描线4倍、上色6倍人速；描线笔尖每帧不超过约80px，上色宽笔每帧不超过约120px）；`sketch:true` 先画淡色构图线，描线后淡出。
-- 插画引擎（draw-v3）：只有真实墨线才描线——比旁边填充更暗、又接近整张图墨色的细线；深色填充（卫衣、头发、夜空、青色屏幕）的边缘带属于上色，黑色剪影只描细边缘作轮廓；墨色与底色太接近处判定为"墨"或"底色"，不出半透明噪点；离线条很远、只有几个像素的孤立墨点留给上色。轮廓经清理、骨架化后沿切线连续穿过交叉点成整笔，每笔整体属于一个部位。**笔顺按对象规划**：部位内先按图像实心区块分"对象"（眼睛属于它所在的脸），一个对象画完再画下一个，对象按阅读顺序（先上后左）、大的优先并兼顾笔尖距离；对象内先外轮廓，再画从已画线条上"长出来"的线，就近、先长后短、尽量不回头往上；下一笔起点紧贴刚画完的线时笔不抬起、直接滑过去。每笔 min-jerk 速度、转弯处放慢；时间紧时较长的笔改用两端缓起缓收、中段匀速的平台曲线。人速时每笔、每次抬笔至少2帧，延时绘制（快于人速1.5倍以上）时短笔和抬笔可为1帧；空中移动每帧不超过约120px。**时长跟随规划图幅而非屏幕**：以400px为基准，速度、每帧位移上限和马克笔宽度随图幅放大（最多1.8倍），换手长度、色块拆分阈值同样随图幅缩放；实测约每秒5笔，与图幅基本无关。再小的色块也有自己的一笔马克笔，不会随部位整体显出。上色按部位、从离马克笔最近的色块开始就近推进，用中位色以连续之字形大笔涂（区域内不抬笔），再用短暂的阴影笔从平涂过渡到原图。笔画只决定每个像素何时出现：线稿图层用原图自己的墨线像素（压在色块上的墨线先从底色中分离出来），每个像素在笔尖经过它最近的一笔时出现，不另画一套带笔压的线，终帧与原图一致；若成图出现断线、毛边，先查引擎，不要先怪原图。资产为 `{name}.png` 终帧加 `-line/-paint/-shade(-sketch).png` 图层和 `.npz` 时间图，逐帧合成，终帧与最后一帧一致。
+- `drawing`：job 顶层或 action 内 `{"speed":1.0,"sketch":false}`，action 覆盖顶层。
+  - `speed`（0.25—4）缩放人手基准速度及其上限：描线 4 倍、上色 6 倍人速；描线笔尖每帧不超过约 80px，上色宽笔每帧不超过约 120px。
+  - `sketch:true` 先画淡色构图线，描线后淡出。`sketch` 也可以是模型规划的起形列表（ellipse/box/line/polygon，见[拟人绘制步骤](style-and-drawing.md)）：在墨线前画出，墨线后由橡皮擦掉（`erase` 笔段），再上色。
+  - `colouring`：`"markers"`（默认，按马克笔：同色一起涂，先浅后深，每种颜色涂完底色再压阴影）或 `"parts"`（按模块）。
+- 插画引擎（draw-v3）：只有真实墨线才描线——比旁边填充更暗、又接近整张图墨色的细线；深色填充（卫衣、头发、夜空、青色屏幕）的边缘带属于上色，黑色剪影只描细边缘作轮廓；墨色与底色太接近处判定为"墨"或"底色"，不出半透明噪点；离线条很远、只有几个像素的孤立墨点留给上色。轮廓经清理、骨架化后沿切线连续穿过交叉点成整笔，每笔整体属于一个部位。**笔顺按对象规划**：部位内先按图像实心区块分"对象"（眼睛属于它所在的脸），一个对象画完再画下一个，对象按阅读顺序（先上后左）、大的优先并兼顾笔尖距离；对象内先外轮廓，再画从已画线条上"长出来"的线，就近、先长后短、尽量不回头往上；下一笔起点紧贴刚画完的线时笔不抬起、直接滑过去。每笔 min-jerk 速度、转弯处放慢；时间紧时较长的笔改用两端缓起缓收、中段匀速的平台曲线。人速时每笔、每次抬笔至少2帧，延时绘制（快于人速1.5倍以上）时短笔和抬笔可为1帧；空中移动每帧不超过约120px。**时长跟随规划图幅而非屏幕**：以400px为基准，速度、每帧位移上限和马克笔宽度随图幅放大（最多1.8倍），换手长度、色块拆分阈值同样随图幅缩放；draw-v3 实测约每秒5–6笔，v3（加起形、擦除、按马克笔上色）约每秒3.9笔，都与图幅基本无关。再小的色块也有自己的一笔马克笔，不会随部位整体显出。上色按部位、从离马克笔最近的色块开始就近推进，用中位色以连续之字形大笔涂（区域内不抬笔），再用短暂的阴影笔从平涂过渡到原图。笔画只决定每个像素何时出现：线稿图层用原图自己的墨线像素（压在色块上的墨线先从底色中分离出来），每个像素在笔尖经过它最近的一笔时出现，不另画一套带笔压的线，终帧与原图一致；若成图出现断线、毛边，先查引擎，不要先怪原图。资产为 `{name}.png` 终帧加 `-line/-paint/-shade(-sketch).png` 图层和 `.npz` 时间图，逐帧合成，终帧与最后一帧一致。
 - 时长：元数据 `drawability.required_seconds` 是全部按人速画完所需，`minimum_seconds` 是全部线条（含细节和纹理线）按上限速度描完、再用最宽笔快速上色所需。窗口低于 `minimum_seconds` 时故事板检查报错，只能简化画面或延长窗口；介于两者之间时笔加速、顺序改为就近，但每一笔都画出来，没有淡入或整块显现（`drawn_stroke_count` 等于 `stroke_count`）。`python3 scripts/engine_metrics.py work/assets element-0007` 输出笔画长度、抬笔路径、跳笔、反向、速度变化和“首次可见即终色”等客观指标。
 
 汉字按规范笔顺手写：字形与笔画中线来自 Make Me a Hanzi（`assets/hanzi`，Arphic Public License），笔尖沿中线移动，笔画按经过的位置显现，逐笔抬笔，逐字从左到右；字形按所选字体的汉字高度和中心对齐，并略加粗以接近马克笔。包内含 GB2312 全部6763字；其他字首次使用时从 jsDelivr 固定版本下载到素材缓存，离线或无数据不报错。只要一行中有一个汉字缺数据，整行改用字体骨架描线（保持同一观感），资产元数据 `handwriting.mode/reason` 记录原因。拉丁字母、数字和标点沿字体路径，横向笔画从左到右、其余从上到下。每笔至少2帧、限速；`handwriting.natural_seconds/minimum_seconds` 给出自然与最低时长，分到的时间不足时整体压缩并在 build 时提示。笔顺要看得清，标题每字约需0.3—0.6秒，用 `weight` 给足时间。
 
 跨多句的一个完整画面可以使用页面 `visual_groups`，每组为 `{"start_beat":0,"end_beat":2,"lead":0.54,"hold":0.72,"actions":[...]}`，索引从0开始。此时 beats 中的 actions 可以为空或省略。起止索引必须有序且在该页范围内，lead 非负，hold 至少0.45秒；多个组不能造成主笔事件重叠。不要给每句机械安排一幅新图。一个画面讲多句时，按句拆成多个动作并用 `from_beat` 让每个动作随它那句起笔，不要让一个动作铺满整组。
 
-生产任务必须使用 `narration.source/alignment` 指定完整旁白母带和对应时间戳，字段见[连续旁白约定](continuous-narration.md)。`audio.end_hold_seconds` 只控制整篇声音结束后的画面停留；生产任务拒绝非零 `sentence_pause_seconds/page_pause_seconds`、`pace` 非1和 `trim_silence:true`。绘制窗口太短则简化画面或合并绘制窗口，不能截短呼吸、插入空白或拉慢旁白来容纳画面。封面只接受1秒，前半秒静止、后半秒渐隐，正文和旁白从1秒后开始。
+生产任务必须使用 `narration.source/alignment` 指定完整旁白母带和对应时间戳，字段见[连续旁白约定](continuous-narration.md)。`audio.end_hold_seconds` 只控制整篇声音结束后的画面停留；生产任务拒绝非零 `sentence_pause_seconds/page_pause_seconds`、`pace` 非1和 `trim_silence:true`。绘制窗口太短则简化画面或合并绘制窗口，不能截短呼吸、插入空白或拉慢旁白来容纳画面。封面只接受1秒，前半秒静止、后半秒渐隐进第一页；旁白和正文从 `1 - cover.voice_overlap` 秒开始（默认0.5秒，范围0–0.5，测试夹具默认0），时间线记 `voice_start_seconds`。
 
 ## 镜头与转场
 
@@ -133,7 +136,7 @@
 
 `font` 为 `{"path":"/actual/font.ttc","index":2}`。字幕按[字幕与片尾设计](subtitle-design.md)由模型独立决定。`captions` 支持 `font:{path,index}/font_size/color/bottom_margin/max_width_ratio/max_lines/stroke_width/stroke_color`，以及 `strip_punctuation/keywords/highlight_numbers/highlight_color/max_chars`（beat 级 `caption_keywords`），默认值与竖屏安全区见字幕设计；`background:null` 不生成底板；可选 `background:{color,opacity}` 轻度底板；不继承顶层手写字体。优先单行，最多两行。beat 可增加 `caption_cues:[{"text":"完整短句。","start":0,"end":2.5}]`，秒数相对母带对应 beat 的开始时间；生产字幕时间写在 alignment 对应 beat 中，所有文本拼接须与 beat 文本逐字一致；不需要为字幕重新生成或切割语音。字幕作为静态排字显示，不执行主笔描写。`paper` 为十六进制颜色。默认管线适合白底或透明底的清晰线稿，不保证复杂深色背景自动分离成功。
 
-可用 `ending:{"fade_seconds":0.6}` 指定片尾渐隐到纸色；渐隐须完全位于最后一句结束后的停留区间内。`audio.end_hold_seconds` 默认0.45秒、范围0.2—0.8秒，默认不渐隐。总尾部静音不得超过1.2秒；详见[声音与收尾硬约束](audio-and-ending.md)。
+`ending.settle_seconds`（默认2.5秒，0–3.5）在 `end_hold_seconds` 之后再让完成画面停留。可用 `ending:{"fade_seconds":0.6}` 指定片尾渐隐到纸色；渐隐须完全位于最后一句结束后的停留区间内。`audio.end_hold_seconds` 默认0.45秒、范围0.2—0.8秒，默认不渐隐。总尾部静音不得超过1.2秒；详见[声音与收尾硬约束](audio-and-ending.md)。
 
 ## 命令
 
@@ -175,13 +178,13 @@ python3 /path/to/skill/scripts/drawing_contract.py /path/to/job --thumbnails  # 
 
 ## 画风与绘制计划门槛
 
-生产任务必须完成[画风选择与可绘制约定](style-and-drawing.md)。`job.json` 增加 `drawing_plan`、`drawing_review`；每个插画 action 增加 `drawing_plan_id`，需要独立轮廓时增加 `outline_mask`。旧任务不能直接绕过新门槛。
+生产任务必须完成[画风选择与可绘制约定](style-and-drawing.md)。`job.json` 增加 `drawing_plan`、`drawing_review`；每个插画 action 增加 `drawing_plan_id`，需要独立轮廓时增加 `outline_mask`；线稿先行（`line_first`）的插画另加 `line_first`：`line_first.py` 写出的报告路径。旧任务不能直接绕过新门槛。
 
 ## v1.2 可选制作设置
 
 开始时按[可选制作设置](production-options.md)收集偏好。`hand.preset` 新增 `pen-only`：`navy` 同一支笔去掉手臂，阴影从笔尖起，不套用前臂长度规则。`hand.pen_text` 上限为16个字符。字幕可设 `background:{"color":"#243039","opacity":0.76}` 并配白字；空背景仍可用。上述新约定替代旧示例中的20字符与固定无背景。
 
-`watermark:{"text":"用户原文，可换行","opacity":0.24}` 添加低对比、缓慢浮动水印；不配置或空文字不加。默认1080p约27px，可指定 `font/color/font_size`，不透明度上限0.35。固定封面静止阶段不漂移，从1秒正文开始显示，位置始终在画内并避开底部字幕。
+`watermark:{"text":"用户原文，可换行","opacity":0.24,"position":"auto"}` 添加低对比水印；不配置或空文字不加。`position` 默认 `auto`：渲染前对每页抽6帧，在四角和左右边缘的18个位置里挑墨迹最少的一处（写入 `work/watermark-plan.json`，换位置时在翻页处淡出淡入），最佳位置仍压墨超过6%时 `verify` 失败；可固定为 `top_right/top_left/bottom_right/bottom_left`，`legacy` 恢复旧的浮动位置。默认1080p约27px，可指定 `font/color/font_size`，不透明度上限0.35。字外有一圈同不透明度的纸色描边（`halo`，默认 `#F2EFE8`，`false` 关闭），漂到深色画面（夜景）上也看得见。固定封面静止阶段不漂移，从1秒正文开始显示，位置始终在画内并避开底部字幕。
 
 `ending.caption_hold_seconds` 可延长最后一句的阅读停留；必须小于或等于末句后停留减去渐隐的时间。字幕文字不变，SRT和实际画面一起延长。
 

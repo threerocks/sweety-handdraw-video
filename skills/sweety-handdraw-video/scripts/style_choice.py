@@ -181,7 +181,10 @@ def verify_style(job):
     if model_chosen and monochrome and not resolved.get('monochrome_reason'):
         raise ValueError('A style the model picks should be drawn and coloured: prefer ' + ', '.join(sorted(DRAWN_STYLES - MONOCHROME_STYLES, key=float))
                          + '; black-and-white style 1 needs monochrome_reason: why this content must stay uncoloured')
-    return {'mode': selection['mode'], 'name': resolved['style_name'], 'resolved_sha256': digest(resolved_path), 'drawing_mode': drawing_mode}
+    import style_fit
+    fit = style_fit.check(job, resolved, selection)
+    return {'mode': selection['mode'], 'name': resolved['style_name'], 'resolved_sha256': digest(resolved_path), 'drawing_mode': drawing_mode,
+            'content_fit_check': fit}
 
 
 def serve_picker(job, source, port=0):

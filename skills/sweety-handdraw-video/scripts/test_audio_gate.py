@@ -54,6 +54,19 @@ class AudioGateTests(unittest.TestCase):
         vowel[:len(time)] += .2 * np.sin(2 * np.pi * 247 * time)
         self.assertEqual(measure(vowel, short_clip=True)['tonal_lines_hz_persistence'], [])
 
+    def test_the_voices_own_pitch_is_not_hum_but_a_tone_through_the_pauses_is(self):
+        # The v3 film: a long list read evenly holds a male pitch near 120 Hz for seconds; seven takes failed as "hum".
+        speech = speech_like([(2.5, .4)] * 3)
+        time = np.arange(len(speech)) / SAMPLE_RATE
+        voiced = np.abs(speech) > 1e-3
+        envelope = np.convolve(voiced.astype(float), np.ones(480) / 480, mode='same')
+        pitch = speech + .15 * envelope * np.sin(2 * np.pi * 120 * time)          # only while speaking
+        report = measure(pitch, short_clip=True)
+        self.assertEqual(report['status'], 'PASS', report['failures'])
+        self.assertTrue(report.get('voice_pitch_lines'))
+        hum = measure(speech + .01 * np.sin(2 * np.pi * 120 * time), short_clip=True)   # the same frequency, through the pauses
+        self.assertTrue(any('120 Hz' in failure for failure in hum['failures']))
+
     def test_dirty_reference_is_rejected_with_cleanup_hint(self):
         with tempfile.TemporaryDirectory() as directory:
             clean = speech_like([(2.5, .5)] * 4)

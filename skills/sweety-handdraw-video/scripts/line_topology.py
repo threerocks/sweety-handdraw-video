@@ -166,6 +166,10 @@ def extract_strokes(outline, support=None, size=1.):
     if not clean.any():
         clean = outline.copy()
     skeleton = prune_spurs(thin_ink(clean))
+    if not skeleton.any() and clean.any():
+        # A mark only a few pixels across (an enlarged tiny ring) thins and prunes to nothing: trace its rim instead,
+        # so the pen still draws it rather than the picture having no strokes at all.
+        skeleton = clean & ~ndimage.binary_erosion(clean)
     support_mask = clean if support is None else (support | clean)
     support_distance = ndimage.distance_transform_edt(~support_mask)
     raw = trace(graph(skeleton))

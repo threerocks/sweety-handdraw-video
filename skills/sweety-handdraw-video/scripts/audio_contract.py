@@ -14,8 +14,12 @@ def resolve_audio_layers(root, manifest):
     parse_sfx(options.get('sfx'))
     layers = []
     if music not in (None, False):
-        if not isinstance(music, dict) or not music.get('user_instruction'):
-            raise ValueError('Background music is off by default and needs an explicit user instruction')
+        from music_synth import parse_source
+        # A user's own music file needs their instruction. A builtin bed is composed here in code (nothing sampled), so the
+        # director may choose it for the film's emotional continuity, with the reason written down.
+        directed = isinstance(music, dict) and parse_source(music.get('source')) and str(music.get('director_reason', '')).strip()
+        if not isinstance(music, dict) or not (music.get('user_instruction') or directed):
+            raise ValueError('Background music needs an explicit user instruction, or a builtin:<mood> bed with director_reason')
         layer = {**music, 'kind': 'music', 'start': 0.}
         from music_synth import parse_source, render_source, DEFAULT_GAIN
         if parse_source(music.get('source')):
