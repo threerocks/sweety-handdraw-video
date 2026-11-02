@@ -633,7 +633,9 @@ def cue_pieces(text, limit=MAX_CUE_CHARS, keywords=()):
             packed[-1][0] += piece
             continue
         previous = packed[-1] if packed else None
-        if (previous and previous[1] and not ends_sentence(previous[0])
+        # A semicolon closes one condition and its action ("加 soft，改动还留着；"): the next clause starts a new pair, so a
+        # cue never ends on the condition of the next one ("用 amend 或 reset；推送了，").
+        if (previous and previous[1] and not ends_sentence(previous[0]) and previous[0].rstrip()[-1:] not in '；;：:'
                 and shown_width(previous[0] + piece) <= limit):
             previous[0] += piece
             previous[1] = closes_clause

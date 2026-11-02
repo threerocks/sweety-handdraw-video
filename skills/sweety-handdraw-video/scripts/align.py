@@ -393,6 +393,12 @@ def close_fluent_gaps(samples, ranges, rate=SAMPLE_RATE, tolerance=SYNC_TOLERANC
     return [tuple(span) for span in result]
 
 
+def implausible_rates(texts, ranges, ratio=2.5, minimum=6):
+    """True when one piece of a chunk is read more than ratio times as fast as another (pieces of >= minimum characters)."""
+    rates = [len(spoken(text)) / max(.05, right - left) for text, (left, right) in zip(texts, ranges) if len(spoken(text)) >= minimum]
+    return len(rates) >= 2 and max(rates) > ratio * min(rates)
+
+
 def piece_ranges(samples, texts, words=None, rate=SAMPLE_RATE):
     """Ranges (seconds within samples) for consecutive text pieces, from timestamps or pauses."""
     if words:
@@ -403,7 +409,13 @@ def piece_ranges(samples, texts, words=None, rate=SAMPLE_RATE):
         # "叮") belongs to the first piece; otherwise that piece would get no time at all.
         if len(found) and found[0] < ranges[0][0] - SYNC_TOLERANCE_SECONDS / 2:
             ranges[0] = (float(found[0]), ranges[0][1])
-        return snap_to_onsets(found, ranges), f'timestamps (matched {matched:.0%})'
+        snapped = snap_to_onsets(found, ranges)
+        if implausible_rates(texts, snapped):
+            # Recognizer times can bunch a clause into a fraction of a second (13 characters in 0.83 s after 9 in 2.7 s):
+            # a reader cannot read that cue. Fall back to pauses near the text proportion, as for audio without times.
+            fallback, method = pause_split(samples, [max(1, len(spoken(text))) for text in texts], rate)
+            return fallback, method + ' (timestamps bunched)'
+        return snapped, f'timestamps (matched {matched:.0%})'
     return pause_split(samples, [max(1, len(spoken(text))) for text in texts], rate)
 
 

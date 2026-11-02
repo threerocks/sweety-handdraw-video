@@ -103,7 +103,7 @@
 
 | recipe | 关键参数 | 用途 |
 |---|---|---|
-| `kinetic_title` | `text`、`keywords`（主色强调）、`style`、size、font（hand、sans、serif）、underline、badge（标题前的编号圈：条目标题用它，和章节标题分开层级） | 开场标题、金句、章节名。style 有八种：<br>• glyph_in：整字逐个淡入、轻微上浮落定，任何时刻都没有被遮掉半截的字；关键词保留强调色，英文单词和数字整体出现；停下后和 mask_up 的位置一模一样。开场标题首选它<br>• blur_up：模糊上浮，产品站质感<br>• spring_pop：逐字弹出<br>• mask_up：遮罩上推（中途只露出半个字，旧片保留，新片开场用 glyph_in）<br>• typewriter：打字机<br>• slam：逐词砸入并震屏，每段最多一次<br>• scramble：乱码收敛成字，适合数字和科技感<br>• word_by_word：逐词出现，关键词先大后缩、挤开邻词<br>blur_up、mask_up、typewriter、glyph_in 会把逐词（逐字）间隔压进这一层自己的 `seconds` 里，长句在结束前两帧全部落定，不会定格在半模糊上<br>换行：只在词与词之间断（数字连单位、人名连“·”、标点不落到行首）；要换行时两行尽量等长，优先断在逗号、问号后，末行不会只剩“哪一条？”这样的短词 |
+| `kinetic_title` | `text`、`keywords`（主色强调）、`keyword_colors`（可选，给个别关键词单独配色，如 `{"红的": "#E04B3C", "蓝的": "#3E7CC4"}`；没列出的关键词仍用 `accent`；八种 style 都生效，包括 glyph_in；只写在这里的词也会上色，但最好同时列进 keywords，这样不会在词中间换行）、`style`、size、font（hand、sans、serif）、underline、badge（标题前的编号圈：条目标题用它，和章节标题分开层级） | 开场标题、金句、章节名。style 有八种：<br>• glyph_in：整字逐个淡入、轻微上浮落定，任何时刻都没有被遮掉半截的字；关键词保留强调色，英文单词和数字整体出现；停下后和 mask_up 的位置一模一样。开场标题首选它<br>• blur_up：模糊上浮，产品站质感<br>• spring_pop：逐字弹出<br>• mask_up：遮罩上推（中途只露出半个字，旧片保留，新片开场用 glyph_in）<br>• typewriter：打字机<br>• slam：逐词砸入并震屏，每段最多一次<br>• scramble：乱码收敛成字，适合数字和科技感<br>• word_by_word：逐词出现，关键词先大后缩、挤开邻词<br>blur_up、mask_up、typewriter、glyph_in 会把逐词（逐字）间隔压进这一层自己的 `seconds` 里，长句在结束前两帧全部落定，不会定格在半模糊上<br>换行：只在词与词之间断（数字连单位、人名连“·”、标点不落到行首）；要换行时两行尽量等长，优先断在逗号、问号后，末行不会只剩“哪一条？”这样的短词 |
 | `rough_annotate` | type（circle、box、underline、highlight、strike-through、crossed-off、bracket） | 在已画好的元素上画圈、划线 |
 | `sketch_shapes` | shapes：arrow、curve_arrow、line、rect、ellipse、polygon、check、cross、bracket、star；`flow` 为流动虚线 | 手绘箭头、勾叉、流向 |
 | `callout` | text、tail | 弹出的手绘气泡或标签 |
@@ -112,7 +112,7 @@
 | `burst` | kind：sparkle、heart、confetti | 揭晓、达成。只在有起因时用 |
 | `morph` | shapes：[{shape：circle、dot、rect、card、star、heart、triangle、diamond、arrow 或自定 path，box，fill，stroke，text，hold_ms}] | "持续主角"：一个点变成卡片、再变成下一个概念。先沿路径拉伸，后半程才变形，颜色跟着过渡 |
 | `rough_chart` | kind 见下 | 手绘图表：先画坐标轴，再出数据，每张图只强调一件事（`highlight`）。数据必须真实 |
-| `map_route` | route：[[经度, 纬度], …]；stops：[{at, label}]；projection：globe（转动的地球，跟随标记）或 flat（fit 设为 route 或 world）；travel_ms | 路线、航线、海缆、迁徙。只画海岸线，不画国界 |
+| `map_route` | route：[[经度, 纬度], …]；stops：[{at, label}]；projection：globe（转动的地球，跟随标记）或 flat（fit 设为 route 或 world）；travel_ms；zoom（默认自动；数字 = 放大倍数；false = 保持整球转动）；max_zoom（自动放大的上限，默认 40）；locator（false 去掉角落的小地球）；label_size（默认在 1126 宽的框里是 36 px）；label_halo（标签底下纸色描边的颜色，false 关掉）；intro_ms（放大时默认 1000，否则 600） | 路线、航线、海缆、迁徙。只画海岸线，不画国界<br>• 短路线自动放大：路线在整个地球上不到框短边的一半时，开场从整球推近到路线，路线约占框的七成，球面由框内的圆角边裁开。放大到 3 倍以上时，最空的角落会出现一个小地球，用路线色框出当前范围<br>• 标签不叠：每个站名在点的上、下、左、右和四个斜角里挑空位，不压别的标签、站点和标记，尽量不压路线，也不贴到别的站点旁边；挤不下就往外挪，并画一条细引线连回站点。标签始终在框内，带纸色描边；在转动的地球上跟着站点走 |
 | `physics` | scene：pour（倒入，默认）、topple（多米诺）、stack（球撞倒一摞方块）、bounce（弹跳）；container：jar、tray、floor、none；items：[{shape：circle、box、pill，size 或 w/h，fill，label，count}]；gravity；drop_ms | 真实物理（matter-js）："钱越攒越多"、"一个倒下全部倒下"、"一推就塌"。每个物体保持一份手绘轮廓，跟着刚体转动，不抖线 |
 | `spin3d` | shape：box、coin、cylinder、cone、sphere、pyramid、gem；colors：[主色, 侧面, 顶面]；turns；tilt；axis（y 或 x） | 转动的立体物件（Zdog），有墨线外轮廓和平涂明暗：硬币翻面、产品转一圈、晶体、积木。先带一点过冲弹出，再转 |
 | `formula` | tex（TeX）；size（每 em 像素，默认撑满框）；color；glyph_ms；highlight：{from, to（字形序号），style：circle、box、underline} | 手写公式（MathJax）：每个字形先描轮廓再填实，按书写顺序走，分数线先于分母，根号先于根式里的内容。写完可以圈出一部分。TeX 写错时 `build` 直接报错 |

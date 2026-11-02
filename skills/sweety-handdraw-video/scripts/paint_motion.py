@@ -96,6 +96,87 @@ def region_pixels(region, image):
     return image[top:top + height, left:left + width][region['mask']]
 
 
+SMALL_AREA = 60.      # px (at the calibration size): a closed area this large can be coloured on its own ...
+AREA_DEPTH = 2.5      # ... when it holds a pixel this far from its edge (an area, not a seam between two lines)
+SHARE_REACH = 12.     # px (at the calibration size): such an area this close to a kept area of its colour shares its region
+WRONG_SHARE = .2      # an area is absorbed in another colour when this share of its pixels would take another marker's
+
+
+def own_colour_areas(found, rgb, kept, size=1.):
+    """Labels of the closed areas to colour as regions: `kept` (the areas large beside their part) and every smaller
+    area, big enough to colour, that the nearest kept area would otherwise absorb in another marker's colour. Absorbed,
+    such an area took that neighbour's flat colour and showed its own only when a darker 'shadow' marker went over it
+    (sky-colors film, 2026-11-02: a small man under a sky blue on the left and orange on the right, colouring by marker
+    with the whole picture as one part, was painted as the sky on either side of his centreline; the sun as the sky).
+    An area so kept that lies within SHARE_REACH of a kept area of its own colour (a trouser leg across the belt line
+    from the jacket, sky seen between the legs) is coloured with it as one region, as one marker does in one round: it
+    is relabelled in `found` and not returned; so is a speck too small for a pass that has such an area within reach.
+    found: area label of each pixel (0 = none, such as the ink), changed in place; rgb: the picture's colours there."""
+    count = int(found.max()) + 1
+    sizes = np.bincount(found.ravel(), minlength=count)
+    if not kept or count <= 1:
+        return list(kept)
+    edge = np.zeros(found.shape, bool)
+    edge[:-1] |= found[:-1] != found[1:]
+    edge[1:] |= found[1:] != found[:-1]
+    edge[:, :-1] |= found[:, :-1] != found[:, 1:]
+    edge[:, 1:] |= found[:, 1:] != found[:, :-1]
+    present = np.nonzero(sizes[1:])[0] + 1
+    depth = np.zeros(count)
+    depth[present] = ndimage.maximum(ndimage.distance_transform_edt(~edge), found, present)
+    candidates = (sizes >= SMALL_AREA * size * size) & (depth >= AREA_DEPTH)
+    candidates[0] = False
+    candidates[kept] = False
+    colours = np.zeros((count, 3))
+    for channel in range(3):
+        colours[present, channel] = ndimage.median(rgb[..., channel], found, present)
+    large, kept = set(kept), list(kept)
+
+    def absorbed_wrong(labels):
+        """Of these areas, the ones whose pixels the nearest kept areas would give another marker's colour (WRONG_SHARE
+        of them or more; pixel by pixel, so an area of two paints with no line between them, split by its neighbours
+        each in its own colour, stays absorbed)."""
+        _, nearest = ndimage.distance_transform_edt(~np.isin(found, kept), return_indices=True)
+        absorber = found[nearest[0], nearest[1]]
+        where = labels[found]
+        if not where.any():
+            return np.zeros(0, np.int64)
+        wrong = np.linalg.norm(rgb[where] - colours[absorber[where]], axis=-1) >= SAME_MARKER
+        share = np.bincount(found[where], weights=wrong, minlength=count) / np.maximum(sizes, 1)
+        return np.nonzero(labels & (share >= WRONG_SHARE))[0]
+
+    for _ in range(8):   # an area kept in one round can absorb a smaller one in the next
+        candidates[kept] = False
+        added = absorbed_wrong(candidates) if candidates.any() else []
+        if not len(added):
+            break
+        kept += added.tolist()
+    # Areas too small or thin for a pass of their own (a sleeve's edge beside the sky) go with a kept area of their colour
+    # within reach rather than the nearest one, so they too take their own colour.
+    rest = sizes > 0
+    rest[0] = False
+    rest[kept] = False
+    specks = absorbed_wrong(rest) if rest.any() else []
+    reach = SHARE_REACH * size
+    pad = int(math.ceil(reach)) + 1
+    for value in sorted(set(kept) - large, key=lambda value: -sizes[value]) + sorted(specks, key=lambda value: -sizes[value]):
+        same = [other for other in kept if other != value and np.linalg.norm(colours[other] - colours[value]) < SAME_MARKER]
+        mine = found == value
+        ys, xs = np.nonzero(mine)
+        window = (slice(max(0, ys.min() - pad), ys.max() + pad + 1), slice(max(0, xs.min() - pad), xs.max() + pad + 1))
+        target = np.isin(found[window], same)
+        if not target.any():
+            continue
+        distance, nearest = ndimage.distance_transform_edt(~target, return_indices=True)
+        closest = np.unravel_index(np.argmin(np.where(mine[window], distance, np.inf)), distance.shape)
+        if distance[closest] > reach:
+            continue
+        found[mine] = found[window][nearest[0][closest], nearest[1][closest]]
+        if value in kept:
+            kept.remove(value)
+    return kept
+
+
 def color_regions(rgb, visible, owners, part_count, labels=None, size=1.):
     """Regions to paint: the model's region map when given, else palette regions per part.
     Specks are absorbed by their nearest region instead of becoming separate passes."""
@@ -123,6 +204,10 @@ def color_regions(rgb, visible, owners, part_count, labels=None, size=1.):
                         found[pieces == piece] = found.max() + 1
         sizes = np.bincount(found[local], minlength=found.max() + 1)
         large = [value for value in range(1, len(sizes)) if sizes[value] >= max(60, .01 * area)]
+        if labels is not None:
+            # A closed area small beside its whole part (colouring by marker: the whole picture) is still its own area
+            # when absorbing it would paint it another colour (or shares a nearby area of its own colour).
+            large = own_colour_areas(found, rgb[crop], large, size)
         found[~np.isin(found, large)] = 0
         if not large:
             found[local], large = 1, [1]

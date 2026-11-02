@@ -1,8 +1,9 @@
 # v3.0.0 收官版（2026-11-02）
 
-- 回归：Skill 虚拟环境 382 项通过（1 项平台用例跳过），tools 测试与离线冒烟短片通过；`validate_package` 48.64 MB（上限 50 MB）；`tools/release.py check` 通过。新增 `test_v3_final.py`（水印选位与淡入淡出、旁白提前开口与结尾落定、推镜避让屏幕标题、屏幕层写字保持静止、标题轮流出场阈值、读法写法、导演检查新项）、`test_v3_text_breaks.py`、`test_v3_media.py`、`test_production_kit.py`、`test_v3_budget_gaps.py`、`test_v3_person_colours.py`。
+- 回归：Skill 虚拟环境 398 项通过（1 项平台用例跳过），tools 测试与离线冒烟短片通过；`validate_package` 48.69 MB（上限 50 MB）；`tools/release.py check` 通过。新增 `test_v3_final.py`（水印选位与淡入淡出、旁白提前开口与结尾落定、推镜避让屏幕标题、屏幕层写字保持静止、标题轮流出场阈值、读法写法、导演检查新项）、`test_v3_text_breaks.py`、`test_v3_media.py`、`test_production_kit.py`、`test_v3_budget_gaps.py`、`test_v3_person_colours.py`。
 - 前后对比（同一批 v3 片，旧逻辑与新逻辑分别计算）：水印下墨迹超过 2% 的页 15 → 1；开场半截字的帧 13/43 → 0；词中断行 3 → 0、孤字 6 → 0（775 个文字块）；上色前沿落在规划格线上的比例 0.43–0.67 → 0.25–0.29；存款片结尾推镜 1.077 → 1.027 倍；每部片手写脚本 1,155 行 → 234 行数据。证据在 `output/evidence/v3/final/`。
 - 三部测试片（科普、历史、技术教程）用制作工具包从数据出片，build / render / verify / finalize 通过，首个可辨画面 1.0–1.2 秒，字幕最大偏差 0.06–0.14 秒。
+- 三部样片两轮独立审片：第一轮 2 部“修完小问题后可以”、1 部“需要返工”；修复引擎 8 处（马克笔小区域串色、地图标签避让与推近、平移转场丢屏幕层、流程图标签压线、字幕配反与时间挤压、动效时长）后，第二轮三部都是“修完小问题后可以”，剩余中问题已改。
 - 以上是工程检查。连续观感、画材质感与配乐需要人工观看和试听。
 
 # v2.0.2 取景、句尾与标题交接（2026-10-28）

@@ -205,7 +205,16 @@
     const latin = /^[\x21-\x7E\u00C0-\u024F\u2010-\u201F]+$/;
     const parts = ['spring_pop', 'typewriter', 'scramble'].includes(style)
       ? (p.text.match(/[\x21-\x7E\u00C0-\u024F\u2010-\u201F]+|\s+|[^]/gu) || []) : (p.words || [p.text]);
-    const accented = new Set((p.accents || []).flatMap(([a, b]) => [...Array(b - a).keys()].map((k) => a + k)));
+    // Key words take the accent colour; keyword_colors ({"红的": "#E04B3C", "蓝的": "#3E7CC4"}) gives a key word its own.
+    // A word listed only in keyword_colors is still found in the text (list it in keywords too, so no line breaks inside it).
+    const accent = p.accent || '#E9784E', named = p.keyword_colors || {}, tint = new Map();
+    (p.accents || []).forEach(([a, b]) => { for (let k = a; k < b; k++) tint.set(k, named[p.text.slice(a, b)] || accent); });
+    Object.keys(named).filter((word) => word).sort((a, b) => b.length - a.length).forEach((word) => {
+      for (let at = p.text.indexOf(word); at >= 0; at = p.text.indexOf(word, at + 1)) {
+        const span = [...Array(word.length).keys()].map((k) => at + k);
+        if (!span.some((k) => tint.has(k))) span.forEach((k) => tint.set(k, named[word]));
+      }
+    });
     // A line may break only where a word unit ends (see wordUnits): the parts of one unit (a word's glyphs, "Opus" and
     // "4.5？", "50" and "米") share one nowrap group, so a title never wraps inside a word or before its punctuation.
     const breaks = new Set([0]);
@@ -247,7 +256,7 @@
         }
         const glyph = document.createElement('span');
         glyph.textContent = character;
-        if (accented.has(begin + index)) glyph.style.color = p.accent || '#E9784E';
+        if (tint.has(begin + index)) glyph.style.color = tint.get(begin + index);
         piece.appendChild(glyph);
       });
       group.appendChild(span);
@@ -762,6 +771,10 @@
   // A route over the world drawn as it is travelled: land outlines only (no borders), a great-circle line inked up to
   // a moving marker, stops popping as the marker passes them. projection "globe" turns to follow the marker; "flat" fits
   // the route. route: [[lon, lat], ...]; stops: [{at: [lon, lat], label}].
+  // A short route zooms in (the history film's trip across Central Asia was a 100 px stub on a half globe, its four
+  // labels one black knot): when the route would cover under half the box's short side, the camera flies from the whole
+  // globe down to the route during the intro and holds there, the sphere cut by a rounded frame just inside the box.
+  // zoom: a number sets the factor, false keeps the turning globe; max_zoom caps auto (40).
   Recipes.map_route = (root, p, ctx) => {
     const W = ctx.width, H = ctx.height, scale = ctx.scale;
     const canvas = document.createElement('canvas');
@@ -777,27 +790,130 @@
     const along = (f) => { let rest = f * total; for (const leg of legs) { if (rest <= leg.length || leg === legs[legs.length - 1]) return leg.at(Math.min(1, rest / (leg.length || 1))); rest -= leg.length; } };
     const samples = (f) => { const n = Math.max(2, Math.ceil(240 * f)); return [...Array(n + 1)].map((_, i) => along(f * i / n)); };
     const globe = (p.projection || 'globe') === 'globe';
-    const projection = globe ? d3.geoOrthographic().clipAngle(90).scale(Math.min(W, H) * 0.44).translate([W / 2, H / 2])
-                             : d3.geoNaturalEarth1().fitExtent([[W * 0.08, H * 0.08], [W * 0.92, H * 0.92]], p.fit === 'world' ? { type: 'Sphere' } : { type: 'MultiPoint', coordinates: route });
+    const font = family(p.font || 'hand');
+    const mark = p.label_size || Math.max(20, Math.min(W, H) * 0.045);   // stop dots and the marker keep their 2.0 size
+    const size = p.label_size || Math.max(20, Math.min(W, H) * 0.045, W * 0.032);   // labels: 36 px in a 1126 px box, readable on a phone
+    g.font = `${size}px ${font}`;
+    const line = samples(1), shape = { type: 'MultiPoint', coordinates: line.concat((p.stops || []).map((stop) => stop.at)) };
+    const whole = Math.min(W, H) * 0.44;
+    let zoom = 1, fitted = null;
+    if (globe && p.zoom !== false) {
+      // the globe turned to face the route, scaled so the route and its stops fill the box with room around them for labels
+      const widest = Math.max(0, ...(p.stops || []).map((stop) => (stop.label ? g.measureText(stop.label).width : 0)));
+      const mx = Math.min(W * 0.3, Math.max(W * 0.14, widest * 0.6 + size)), my = Math.min(H * 0.3, Math.max(H * 0.16, size * 1.9));
+      const [[x0, y0], [x1, y1]] = d3.geoBounds(shape);
+      fitted = d3.geoOrthographic().clipAngle(90).rotate([-(x0 + (x1 < x0 ? x1 + 360 : x1)) / 2, -(y0 + y1) / 2])
+        .fitExtent([[mx, my], [W - mx, H - my]], shape);
+      if (!Number.isFinite(fitted.scale())) fitted.scale(whole * (p.max_zoom || 40)).translate([W / 2, H / 2]);   // a route of one point
+      const auto = fitted.scale() / whole, [[a0, b0], [a1, b1]] = d3.geoPath(fitted).bounds(shape);
+      const share = Math.max(a1 - a0, b1 - b0) / auto / Math.min(W, H);   // of the box's short side, on the whole globe
+      zoom = typeof p.zoom === 'number' ? Math.max(1, p.zoom) : share < 0.5 ? Math.max(1, Math.min(auto, p.max_zoom || 40)) : 1;
+    }
+    const zoomed = zoom > 1.05;
+    const projection = globe ? d3.geoOrthographic().clipAngle(90).scale(whole).translate([W / 2, H / 2])
+                             : d3.geoNaturalEarth1().fitExtent([[W * 0.08, H * 0.08], [W * 0.92, H * 0.92]], p.fit === 'world' ? { type: 'Sphere' } : shape);
     const path = d3.geoPath(projection, g);
-    const start = p.delay || 0, intro = p.intro_ms ?? 600, travel = p.travel_ms || 2600;
-    const colors = { land: p.land || '#E4D9C2', coast: p.coast || '#5C5346', sea: p.sea || '#EEF3F2', route: p.color || '#E9784E', ink: ink(p) };
-    const font = family(p.font || 'hand'), size = p.label_size || Math.max(20, Math.min(W, H) * 0.045);
-    const stops = (p.stops || []).map((stop) => {
+    const start = p.delay || 0, intro = p.intro_ms ?? (zoomed ? 1000 : 600), travel = p.travel_ms || 2600;
+    const colors = { land: p.land || '#E4D9C2', coast: p.coast || '#5C5346', sea: p.sea || '#EEF3F2', route: p.color || '#E9784E', ink: ink(p),
+                     halo: typeof p.label_halo === 'string' ? p.label_halo : 'rgba(250, 247, 240, 0.9)' };
+    const inset = 5, frame = () => { g.beginPath(); g.roundRect(inset, inset, W - 2 * inset, H - 2 * inset, Math.min(W, H) * 0.04); };
+    // the camera k of the way (0..1, in log scale) from the whole globe to the zoomed view
+    const aim = (target, k) => {
+      const s = whole * Math.pow(zoom, k), r = s / fitted.scale(), [tx, ty] = fitted.translate();
+      return target.rotate(fitted.rotate()).scale(s).translate([W / 2 - (W / 2 - tx) * r, H / 2 - (H / 2 - ty) * r]);
+    };
+    // zoomed in, the graticule also crosses the land (inland there may be nothing else), with finer lines as it closes in
+    const span = Math.min(W, H) / (whole * zoom) * 180 / Math.PI, step = [0.5, 1, 2, 5].find((s) => span / s <= 6);
+    const fine = zoomed && step ? (() => {
+      const [[x0, y0], [x1, y1]] = d3.geoBounds(shape), m = 3 * span;
+      return d3.geoGraticule().extent([[x0 - m, Math.max(-89, y0 - m)], [(x1 < x0 ? x1 + 360 : x1) + m, Math.min(89, y1 + m)]]).step([step, step]).precision(step / 4)();
+    })() : null;
+    // Deep in (3x and more), a small whole globe in the emptiest corner shows where the view is, its patch outlined in
+    // the route colour; it fades in as the camera arrives. locator: false leaves it out.
+    let locator = null;
+    if (zoomed && zoom >= 3 && p.locator !== false) {
+      const view = aim(d3.geoOrthographic().clipAngle(90), 1), R = Math.max(36, Math.min(W, H) * 0.12), m = inset + 12 + R;
+      const marks = shape.coordinates.map((at) => view(at));
+      const clear = (c) => Math.min(...marks.map(([x, y]) => Math.hypot(x - c[0], y - c[1])));
+      const c = [[W - m, H - m], [m, H - m], [W - m, m], [m, m]].reduce((a, b) => (clear(b) > clear(a) + 1 ? b : a));
+      if (clear(c) > R + size * 2) {
+        const pin = d3.geoOrthographic().clipAngle(90).rotate(fitted.rotate()).scale(R).translate(c);
+        const patch = [[inset, inset], [W - inset, inset], [W - inset, H - inset], [inset, H - inset], [inset, inset]].map((xy) => view.invert(xy));
+        const corners = patch.every((at) => at && at.every(Number.isFinite)) ? patch.map((at) => pin(at)) : [];
+        const across = corners.length ? Math.hypot(corners[0][0] - corners[2][0], corners[0][1] - corners[2][1]) : 0;
+        locator = { x: c[0], y: c[1], R, pin, patch: corners.length ? patch : null, ring: across < 16 ? pin(view.invert([W / 2, H / 2])) : null };
+      }
+    }
+    // Labels never pile up. In route order, each stop's label takes the cheapest free spot around its dot: above, below,
+    // the sides, the diagonals, then the same further out with a thin leader line back to the dot. A spot never leaves
+    // the box and costs heavily if it covers another label, any stop's dot or the marker (where it is and 250 ms on);
+    // covering the route costs extra, so does sitting nearer another stop's dot than its own, and leaving last frame's
+    // spot a little, so labels do not hop as the globe turns.
+    const halo = p.label_halo === false ? 0 : Math.max(2, size * 0.1);
+    const dotR = mark * 0.32 * 1.4 + 2, markerR = mark * 0.42 + 4, lane = (p.route_width || 5) / 2 + 3, edge = (zoomed ? inset : 0) + halo + 3;
+    const AROUND = [[0, -1, 0], [0, 1, 1], [1, 0, 1.5], [-1, 0, 1.5], [1, -1, 2], [-1, -1, 2], [1, 1, 2.5], [-1, 1, 2.5]];   // dx, dy, rank
+    const stops = (p.stops || []).map((stop, index) => {
       let f = 0, bestD = Infinity;
       for (let i = 0; i <= 200; i++) { const d = d3.geoDistance(along(i / 200), stop.at); if (d < bestD) { bestD = d; f = i / 200; } }
       let t = 1; for (let i = 0; i <= 400; i++) if (ease(i / 400) >= f - 1e-9) { t = i / 400; break; }  // when the marker gets there
-      return { ...stop, f, t };
+      const m = stop.label ? g.measureText(stop.label) : null;
+      const box = m && { left: m.actualBoundingBoxLeft, right: m.actualBoundingBoxRight, ascent: m.actualBoundingBoxAscent, descent: m.actualBoundingBoxDescent };
+      if (box) { box.w = box.left + box.right + 2 * halo; box.h = box.ascent + box.descent + 2 * halo; }
+      return { ...stop, index, f, t, box, spot: null, target: null, u: null, v: null, x: 0, y: 0 };
     });
-    const draw = () => {
-      const now = performance.now() - start;
-      const raw = (now - intro) / travel, shown = Math.max(0, Math.min(1, now / Math.max(1, intro))), f = ease(Math.max(0, Math.min(1, raw)));
-      const marker = along(f);
-      if (globe) {
-        const lead = along(Math.min(1, f + 0.08));
-        projection.rotate([-(marker[0] * 0.6 + lead[0] * 0.4), -Math.max(-50, Math.min(50, marker[1])) * 0.55]);
+    const gap0 = dotR + size * 0.12;   // from a dot to its nearest label spot
+    const meets = (a, b, gap) => a[0] < b[2] + gap && b[0] < a[2] + gap && a[1] < b[3] + gap && b[1] < a[3] + gap;
+    const touches = (b, x, y, r) => Math.hypot(Math.max(b[0] - x, 0, x - b[2]), Math.max(b[1] - y, 0, y - b[3])) < r;
+    const place = (dots, marker, trail) => {
+      const taken = [];
+      for (const dot of [...dots].sort((a, b) => a.stop.f - b.stop.f || a.stop.index - b.stop.index)) {
+        const L = dot.stop.box;
+        if (!L) continue;
+        let best = null;
+        for (let ring = 0; ring < 6; ring++) {
+          const gap = gap0 + ring * size * 0.8;
+          AROUND.forEach(([dx, dy, rank], k) => {
+            const cx = dot.x + dx * (gap + L.w / 2), cy = dot.y + dy * (gap + L.h / 2);
+            const box = [cx - L.w / 2, cy - L.h / 2, cx + L.w / 2, cy + L.h / 2];
+            if (box[0] < edge || box[1] < edge || box[2] > W - edge || box[3] > H - edge) return;
+            const covers = taken.filter((other) => meets(box, other, size * 0.15)).length + dots.filter((other) => touches(box, other.x, other.y, dotR)).length
+              + (marker.some(([x, y]) => touches(box, x, y, markerR)) ? 1 : 0) + (locator && touches(box, locator.x, locator.y, locator.R + 8) ? 1 : 0);
+            const crossed = trail.filter(([x, y]) => x > box[0] - lane && x < box[2] + lane && y > box[1] - lane && y < box[3] + lane).length;
+            const near = (other) => Math.hypot(Math.max(box[0] - other.x, 0, other.x - box[2]), Math.max(box[1] - other.y, 0, other.y - box[3]));
+            const misleads = dots.some((other) => other !== dot && near(other) < near(dot) + 2);   // reads as another stop's label
+            const cost = 1000 * covers + 10 * ring + rank + (crossed ? 12 + Math.min(20, crossed * 0.25) : 0) + (misleads ? 15 : 0)
+              + (dot.stop.spot === ring * 8 + k ? 0 : 8);
+            if (!best || cost < best.cost) best = { cost, box, spot: ring * 8 + k };
+          });
+        }
+        if (!best) {   // a box too small for any spot: above the dot, pushed inside
+          const cx = Math.max(L.w / 2, Math.min(W - L.w / 2, dot.x)), cy = Math.max(L.h / 2, dot.y - dotR - L.h / 2);
+          best = { box: [cx - L.w / 2, cy - L.h / 2, cx + L.w / 2, cy + L.h / 2], spot: -1 };
+        }
+        dot.stop.spot = best.spot;
+        dot.stop.target = best.box;
+        taken.push(best.box);
       }
+    };
+    root.__map = { zoom, size, dot: dotR, marker: markerR, locator: locator && [locator.x, locator.y, locator.R] };   // read by the tests
+    let last = null;
+    const draw = () => {
+      const now = performance.now() - start, dt = last === null ? 0 : Math.max(0, now - last);
+      last = now;
+      const raw = (now - intro) / travel, f = ease(Math.max(0, Math.min(1, raw)));
+      const shown = Math.max(0, Math.min(1, now / Math.max(1, zoomed ? intro * 0.3 : intro)));
+      const close = zoomed ? ease((now / Math.max(1, intro) - 0.15) / 0.85) : 0;   // how far the camera has flown in
+      const marker = along(f);
+      if (zoomed) aim(projection, close);
+      else if (globe) {
+        const lead = along(Math.min(1, f + 0.08)), lon = marker[0] + ((((lead[0] - marker[0]) % 360) + 540) % 360 - 180) * 0.4;
+        projection.rotate([-lon, -Math.max(-50, Math.min(50, marker[1])) * 0.55]);   // lead unwrapped across the antimeridian
+      }
+      const facing = [-projection.rotate()[0], -projection.rotate()[1]];
+      const seen = (at) => !globe || d3.geoDistance(at, facing) < Math.PI / 2;
       g.clearRect(0, 0, W, H);
+      g.save();
+      if (zoomed) { frame(); g.clip(); }
       g.globalAlpha = shown;
       if (globe) { g.beginPath(); path({ type: 'Sphere' }); g.fillStyle = colors.sea; g.fill(); g.lineWidth = 3; g.strokeStyle = colors.coast; g.stroke();
         g.beginPath(); path(d3.geoGraticule10()); g.lineWidth = 0.8; g.strokeStyle = 'rgba(92,83,70,0.18)'; g.stroke(); }
@@ -805,25 +921,93 @@
       // A sketchy coast: two passes a hair apart.
       g.lineJoin = 'round'; g.strokeStyle = colors.coast; g.lineWidth = 1.6; g.stroke();
       g.save(); g.translate(0.9, -0.6); g.globalAlpha = shown * 0.45; g.beginPath(); path(land); g.stroke(); g.restore();
+      if (zoomed && close > 0) {
+        g.globalAlpha = shown * close; g.lineWidth = 0.8;
+        g.beginPath(); path(d3.geoGraticule10()); g.strokeStyle = 'rgba(92,83,70,0.16)'; g.stroke();
+        if (fine) { g.beginPath(); path(fine); g.strokeStyle = 'rgba(92,83,70,0.11)'; g.stroke(); }
+      }
+      g.restore();
+      // zoomed in, the box's rounded edge takes over from the sphere's rim wherever the sphere is cut
+      if (zoomed) { g.save(); g.globalAlpha = shown; g.beginPath(); path({ type: 'Sphere' }); g.clip(); frame(); g.lineWidth = 3; g.strokeStyle = colors.coast; g.stroke(); g.restore(); }
+      if (locator && close > 0.6) {
+        const pin = d3.geoPath(locator.pin, g);
+        g.save(); g.globalAlpha = shown * Math.min(1, (close - 0.6) / 0.4);
+        g.beginPath(); pin({ type: 'Sphere' }); g.fillStyle = colors.sea; g.fill(); g.lineWidth = 7; g.strokeStyle = colors.halo; g.stroke();
+        g.beginPath(); pin(land); g.fillStyle = colors.land; g.fill(); g.lineWidth = 1; g.strokeStyle = colors.coast; g.stroke();
+        g.beginPath(); pin({ type: 'Sphere' }); g.lineWidth = 2.5; g.strokeStyle = colors.coast; g.stroke();
+        g.lineWidth = 2.5; g.strokeStyle = colors.route; g.lineJoin = 'round';
+        if (locator.patch) { g.beginPath(); pin({ type: 'LineString', coordinates: locator.patch }); g.stroke(); }
+        if (locator.ring) { g.beginPath(); g.arc(locator.ring[0], locator.ring[1], 9, 0, 2 * Math.PI); g.stroke(); }
+        g.restore();
+      }
       g.globalAlpha = 1;
+      const drawn = [];
       if (now > intro) {
         g.beginPath(); path({ type: 'LineString', coordinates: samples(f) });
         g.strokeStyle = colors.route; g.lineWidth = p.route_width || 5; g.lineCap = 'round'; g.setLineDash([]); g.stroke();
-        for (const stop of stops) {
-          if (stop.f > f + 1e-6) continue;
-          const xy = projection(stop.at), visible = !globe || d3.geoDistance(stop.at, [-projection.rotate()[0], -projection.rotate()[1]]) < Math.PI / 2;
-          if (!xy || !visible) continue;
-          const pop = Math.max(0.0001, Math.min(1, (raw - stop.t) * travel / 260)), r = size * 0.32 * (1 + 0.4 * Math.sin(Math.PI * pop));
-          g.beginPath(); g.arc(xy[0], xy[1], r, 0, 2 * Math.PI); g.fillStyle = '#FFFFFF'; g.fill(); g.lineWidth = 3; g.strokeStyle = colors.ink; g.stroke();
-          if (stop.label) { g.globalAlpha = pop; g.font = `${size}px ${font}`; g.fillStyle = colors.ink; g.textAlign = 'center'; g.fillText(stop.label, xy[0], xy[1] - size * 0.9); g.globalAlpha = 1; }
-        }
+        const dots = stops.filter((stop) => seen(stop.at)).map((stop) => { const [x, y] = projection(stop.at); return { stop, x, y }; });
         const xy = projection(marker);
+        const ahead = [0.5, 1].map((k) => projection(along(ease(Math.max(0, Math.min(1, raw + k * 250 / travel))))));
+        place(dots, [xy, ...ahead].filter(Boolean), line.filter(seen).map((at) => projection(at)));
+        const glide = 1 - Math.exp(-dt / 90);   // a label that has to move slides there
+        for (const { stop, x, y } of dots) {
+          if (stop.f > f + 1e-6) continue;
+          const pop = Math.max(0.0001, Math.min(1, (raw - stop.t) * travel / 260)), r = mark * 0.32 * (1 + 0.4 * Math.sin(Math.PI * pop));
+          g.beginPath(); g.arc(x, y, r, 0, 2 * Math.PI); g.fillStyle = '#FFFFFF'; g.fill(); g.lineWidth = 3; g.strokeStyle = colors.ink; g.stroke();
+          if (!stop.box) continue;
+          // The offset from the dot glides, so a label rides with its dot as the globe turns. It is measured in units of
+          // the label's half size plus the nearest gap (every spot is at least 1 out in x or y there) and swings round the
+          // dot by angle and that max-norm radius, so a label changing sides never passes over its own dot.
+          const nx = stop.box.w / 2 + gap0, ny = stop.box.h / 2 + gap0;
+          const u = ((stop.target[0] + stop.target[2]) / 2 - x) / nx, v = ((stop.target[1] + stop.target[3]) / 2 - y) / ny;
+          if (stop.u === null) { stop.u = u; stop.v = v; } else {
+            let a = Math.atan2(stop.v, stop.u), r = Math.max(Math.abs(stop.u), Math.abs(stop.v));
+            a += (((Math.atan2(v, u) - a) % (2 * Math.PI) + 3 * Math.PI) % (2 * Math.PI) - Math.PI) * glide;
+            r += (Math.max(Math.abs(u), Math.abs(v)) - r) * glide;
+            const c = Math.cos(a), s = Math.sin(a), m = Math.max(Math.abs(c), Math.abs(s));
+            [stop.u, stop.v] = [c / m * r, s / m * r];
+          }
+          stop.x = stop.u * nx; stop.y = stop.v * ny;
+          drawn.push({ stop, x, y, pop, home: [u * nx, v * ny] });
+        }
+        // a slide that would cover another label, a dot or the marker jumps to its spot instead (the spots are clear)
+        const boxOf = ({ stop, x, y }) => [x + stop.x - stop.box.w / 2, y + stop.y - stop.box.h / 2, x + stop.x + stop.box.w / 2, y + stop.y + stop.box.h / 2];
+        for (let pass = 0; pass <= drawn.length; pass++) {
+          const blocked = drawn.filter((item) => {
+            const box = boxOf(item);
+            return (item.stop.x !== item.home[0] || item.stop.y !== item.home[1])
+              && (drawn.some((other) => other !== item && meets(box, boxOf(other), 0)) || dots.some((dot) => touches(box, dot.x, dot.y, dotR))
+                  || (xy && touches(box, xy[0], xy[1], markerR)));
+          });
+          if (!blocked.length) break;
+          blocked.forEach((item) => { [item.stop.x, item.stop.y] = item.home; item.stop.u = item.home[0] / (item.stop.box.w / 2 + gap0); item.stop.v = item.home[1] / (item.stop.box.h / 2 + gap0); });
+        }
         if (xy) {
           const pulse = (now % 900) / 900;
-          g.beginPath(); g.arc(xy[0], xy[1], size * (0.45 + 0.8 * pulse), 0, 2 * Math.PI); g.strokeStyle = colors.route; g.globalAlpha = 1 - pulse; g.lineWidth = 3; g.stroke(); g.globalAlpha = 1;
-          g.beginPath(); g.arc(xy[0], xy[1], size * 0.42, 0, 2 * Math.PI); g.fillStyle = colors.route; g.fill(); g.lineWidth = 3; g.strokeStyle = '#FFFFFF'; g.stroke();
+          g.beginPath(); g.arc(xy[0], xy[1], mark * (0.45 + 0.8 * pulse), 0, 2 * Math.PI); g.strokeStyle = colors.route; g.globalAlpha = 1 - pulse; g.lineWidth = 3; g.stroke(); g.globalAlpha = 1;
+          g.beginPath(); g.arc(xy[0], xy[1], mark * 0.42, 0, 2 * Math.PI); g.fillStyle = colors.route; g.fill(); g.lineWidth = 3; g.strokeStyle = '#FFFFFF'; g.stroke();
         }
+        root.__mapMarker = xy && [xy[0], xy[1], markerR];
       }
+      for (const stop of stops) if (!drawn.some((item) => item.stop === stop)) stop.u = stop.v = null;
+      // leaders and labels over everything, each on a paper-coloured halo
+      g.font = `${size}px ${font}`; g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+      root.__mapLabels = drawn.map(({ stop, x, y, pop }) => {
+        const L = stop.box, lx = x + stop.x, ly = y + stop.y, box = [lx - L.w / 2, ly - L.h / 2, lx + L.w / 2, ly + L.h / 2];
+        const nx = Math.max(box[0], Math.min(box[2], x)), ny = Math.max(box[1], Math.min(box[3], y)), d = Math.hypot(nx - x, ny - y);
+        const leader = d > dotR + size * 0.45;
+        if (leader) {   // moved away from its dot: a thin line back to it
+          const from = mark * 0.32 + 2, to = d - 3;
+          g.beginPath(); g.moveTo(x + (nx - x) * from / d, y + (ny - y) * from / d); g.lineTo(x + (nx - x) * to / d, y + (ny - y) * to / d);
+          g.globalAlpha = 0.75 * pop; g.lineWidth = Math.max(1.5, size * 0.045); g.lineCap = 'round'; g.strokeStyle = colors.ink; g.stroke();
+        }
+        g.globalAlpha = pop;
+        const tx = lx - (L.right - L.left) / 2, ty = ly + (L.ascent - L.descent) / 2;
+        if (halo) { g.lineJoin = 'round'; g.lineWidth = 2 * halo; g.strokeStyle = colors.halo; g.strokeText(stop.label, tx, ty); }
+        g.fillStyle = colors.ink; g.fillText(stop.label, tx, ty);
+        g.globalAlpha = 1;
+        return { label: stop.label, box, dot: [x, y], leader, pop };
+      });
       requestAnimationFrame(draw);
     };
     requestAnimationFrame(draw);
@@ -1284,8 +1468,17 @@
       layer.appendChild(g);
       const at = edge.ms ?? Math.max(a.at, b.at) + 300;
       drawOn(g, at, 360);
-      if (edge.text) appear(label(root, edge.text, (sx + ex) / 2 - (ey - sy) * bend * 0.5 + (edge.text_dx || 0), (sy + ey) / 2 + (ex - sx) * bend * 0.5 - size * 0.7 + (edge.text_dy || 0),
-                                  size * 0.8, p, 'center', edge.text_color || accentOf(p)), at + 200);
+      if (edge.text) {
+        // Beside the line, not on it: offset along the edge's normal (the side facing up), on a paper-coloured pad, so a
+        // diagonal arrow never runs through its own label like a strike-through.
+        const len = Math.hypot(ex - sx, ey - sy) || 1;
+        let nx = -(ey - sy) / len, ny = (ex - sx) / len;
+        if (ny > 0) { nx = -nx; ny = -ny; }
+        const tag = label(root, edge.text, (sx + ex) / 2 - (ey - sy) * bend * 0.5 + nx * size * 0.9 + (edge.text_dx || 0),
+                          (sy + ey) / 2 + (ex - sx) * bend * 0.5 + ny * size * 0.9 + (edge.text_dy || 0), size * 0.8, p, 'center', edge.text_color || accentOf(p));
+        Object.assign(tag.style, { background: p.label_bg || 'rgba(248, 245, 238, 0.94)', padding: '0.08em 0.3em', borderRadius: '0.3em' });
+        appear(tag, at + 200);
+      }
       routes[`${edge.from}>${edge.to}`] = bend ? [[sx, sy], [mx, my], [ex, ey]] : [[sx, sy], [ex, ey]];
     });
     (p.tokens || []).forEach((token, i) => {

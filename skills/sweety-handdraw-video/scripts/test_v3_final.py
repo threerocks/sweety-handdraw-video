@@ -187,3 +187,24 @@ class DirectorChecksTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SecondReviewFixesTests(unittest.TestCase):
+    def test_a_cue_never_ends_on_the_next_condition(self):
+        import caption_assets
+        self.assertEqual(caption_assets.cue_pieces('记住一句话：没推送，用 amend 或 reset；推送了，就用 revert。', 14),
+                         ['记住一句话：', '没推送，用 amend 或 reset；', '推送了，就用 revert。'])
+
+    def test_self_animating_forms_last_long_enough(self):
+        import film_kit
+        self.assertGreaterEqual(film_kit.intrinsic('rough_chart', {'events': [1, 2, 3, 4, 5]}), 3.5)
+        self.assertGreaterEqual(film_kit.intrinsic('map_route', {'travel_ms': 2600}), 4.)
+        self.assertEqual(film_kit.intrinsic('kinetic_title', {}), 0.)
+
+    def test_a_motion_only_page_arrives_already_started(self):
+        from video_renderer import Renderer
+        renderer = Renderer.__new__(Renderer)
+        renderer.timeline = {'pages': [{'events': []}, {'events': [{'caption': True}]}, {'events': [{'caption': False}]}]}
+        window = {'start': 8.9, 'end': 9.6}
+        self.assertEqual(renderer.arrival(1, window, 9.0), 9.6)   # only captions: arrives as it looks when the move ends
+        self.assertEqual(renderer.arrival(2, window, 9.0), 9.0)   # a drawn page arrives live

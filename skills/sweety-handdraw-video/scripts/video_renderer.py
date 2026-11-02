@@ -770,16 +770,34 @@ class Renderer:
         center=start_center+moving*(end_center+[offset,0]-start_center)
         zoom=(start_zoom+moving*(end_zoom-start_zoom))*(1-.14*math.sin(math.pi*moving))
         board=Image.new('RGB',(offset+self.width,self.height),self.paper[:3])
+        arriving_time=self.arrival(index,window,time)
         board.paste(self.screen_board(index-1,time).convert('RGB'),(0,0))
-        board.paste(self.screen_board(index,time).convert('RGB'),(offset,0))
+        board.paste(self.screen_board(index,arriving_time).convert('RGB'),(offset,0))
         left,top=center-np.array([self.width,self.height])/(2*zoom)
-        return board.transform((self.width,self.height),Image.Transform.AFFINE,(1/zoom,0,left,0,1/zoom,top),
-                               Image.Resampling.BILINEAR,fillcolor=self.paper[:3]).convert('RGBA')
+        frame=board.transform((self.width,self.height),Image.Transform.AFFINE,(1/zoom,0,left,0,1/zoom,top),
+                              Image.Resampling.BILINEAR,fillcolor=self.paper[:3]).convert('RGBA')
+        # Screen-space layers (titles, a commit graph, a chart) slide with their page but keep their size and height: they
+        # sit outside the page camera, so riding the board's zoom made a title jump when the move ended. Without them a
+        # page explained only by motion layers panned in and out as blank paper.
+        for page_index,at,shift in ((index-1,time,-moving*offset),(index,arriving_time,(1-moving)*offset)):
+            layer=Image.new('RGBA',(self.width,self.height),(0,0,0,0))
+            self.draw_overlays(layer,page_index,at,'screen')
+            frame.paste(layer,(round(shift),0),layer)
+        return frame
 
     def screen_board(self,index,time,include_hand=True):
         """Whole page at screen resolution, without the camera and captions."""
         frame=self.page_frame(index,time,include_hand,include_captions=False)
         return frame if self.scale(index)==1. else self.apply_camera(frame,np.array([self.width/2,self.height/2]),1.,self.scale(index))
+
+    def arrival(self,index,window,time):
+        """Moment an arriving page is shown at during its transition. A page explained only by motion layers would slide in
+        as blank paper (its layers start at the page start): it arrives as it looks when the move ends instead, then
+        carries on from there. A drawn page arrives live, the hand riding in with it."""
+        page=self.timeline['pages'][index]
+        if any(not event['caption'] for event in page.get('events',())):
+            return time
+        return max(time,window['end'])
 
     def blend(self,index,window,time):
         fraction=(time-window['start'])/(window['end']-window['start'])
@@ -794,10 +812,10 @@ class Renderer:
             frame=self.pan(index,window,time,moving)
         elif window['type'] in TRANSITION_EFFECTS:
             import transitions
-            old,new=self.view(index-1,time,False),self.view(index,time,False)
+            old,new=self.view(index-1,time,False),self.view(index,self.arrival(index,window,time),False)
             frame=getattr(transitions,window['type'])(self,old,new,fraction,window)
         else:
-            old,new=self.view(index-1,time,False),self.view(index,time,False)
+            old,new=self.view(index-1,time,False),self.view(index,self.arrival(index,window,time),False)
             if window['type']=='fade':
                 frame=Image.blend(old,new,moving)
             else:
