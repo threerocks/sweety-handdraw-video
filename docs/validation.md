@@ -1,3 +1,12 @@
+# v3.0.2 近景笔尖、近方形线稿与 gen --edit（2026-11-03）
+
+- 回归：新增 `test_v302_fixes.py`（6 项），放到 v3.0.1 代码上全部不通过（2 项失败、4 项报错）；全套测试、tools 测试与离线冒烟短片通过；`validate_package` 与 `tools/release.py check` 通过。
+- 前后对比（宣传片原始素材）：
+  - 长椅图规划 400 重建，越界上色像素 2 → 0，最大超出 +0.144 px → −0.826 px；
+  - 近方形线稿配准，线条保留 68.6% → 100%，新增 27.9% → 3.6%，失败 → 通过；
+  - `gen --edit 名字` 由报错改为正常调用。
+- 以上是工程检查。近景页面笔尖位置最多移动约 1 px，观感需要人工观看确认。
+
 # v3.0.1 上色条纹（2026-11-03）
 
 - 回归：Skill 虚拟环境 399 项通过（1 项平台用例跳过），tools 测试与离线冒烟短片通过；`tools/release.py check` 通过。新增 `test_v3_media.test_default_marker_colour_is_the_source_with_no_lanes`，`test_v3_marker_leak` 的完成图检查加上默认设置。

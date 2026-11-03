@@ -1,6 +1,6 @@
 # sweety-handdraw-video
 
-安装一个 Skill，按主题或文章制作完整手绘讲解视频。当前版本：v3.0.1。
+安装一个 Skill，按主题或文章制作完整手绘讲解视频。当前版本：v3.0.2。
 
 - 使用入口：[SKILL.md](SKILL.md)
 - 项目说明、安装与样片：[GitHub README](https://github.com/threerocks/sweety-handdraw-video)
@@ -11,10 +11,17 @@
 
 旁白以本地为主：已安装并明确配置的 VoxCPM2，或兼容的本机 VoiceStudio 服务；火山豆包、Gemini TTS 只在用户配置了自己的密钥并选择时使用；已核对的导出音频可以离线复用。音色目录与试听见[本地声音运行](references/local-runtime.md)。生成新图片还需宿主的图像工具（Claude Code 需接入生图工具 / MCP 或使用用户提供的插画）；Python、fontTools 与 FFmpeg 负责本地合成，图片隐私清理为纯 Python。支持 macOS 与 Linux，`scripts/setup.sh` 一次装好运行环境。内置的参考指南不需要另行安装为 Skills。
 
+### v3.0.2：近景笔尖对齐、近方形线稿、`gen --edit`
+
+- 近景重绘（放大 s 倍）时，笔尖路径和墨线压感的中心线按像素中心对齐（`point × s + (s − 1) / 2`），不再偏左上 (s − 1) / 2 像素。
+- 近方形线稿（例如 1199 × 1312）出图时被补成方图，上色图回来后 `line_first.py` 会从正中裁回线稿那一块，不再整张拉伸压扁线条。
+- `art_pipeline.py JOB gen --edit 名字` 可用：参数写在名字前后都行。
+- 详见 [v3.0.2 发布记录](https://github.com/threerocks/sweety-handdraw-video/blob/main/docs/releases/v3.0.2.md)。更新后读取本目录 `VERSION`，应为 `3.0.2`。
+
 ### v3.0.1：上色不再有条纹
 
 - 3.0.0 默认在马克笔的完成色上叠一层斜向笔道，每块颜色都是一条条的。现在完成色默认平涂，与原图逐像素一致；上色时刚落下的一笔仍是湿的、带毡头纹，随即变实。叠涂笔道只在写明 `drawing.texture: {"marker": "layered"}` 时启用。
-- 详见 [v3.0.1 发布记录](https://github.com/threerocks/sweety-handdraw-video/blob/main/docs/releases/v3.0.1.md)。更新后读取本目录 `VERSION`，应为 `3.0.1`。
+- 详见 [v3.0.1 发布记录](https://github.com/threerocks/sweety-handdraw-video/blob/main/docs/releases/v3.0.1.md)。
 
 ### v3.0.0：线稿先行、像人一样画，收官修复
 

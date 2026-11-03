@@ -755,9 +755,18 @@ def texture_option(drawing):
     return result
 
 
+def to_render(points, scale):
+    """Plan coordinates (a pixel's centre is its index) at a render `scale` (x, y) times larger, pixel centres aligned:
+    plan pixel p covers render pixels p*s .. p*s + s - 1, whose centre is p*s + (s - 1) / 2. Scaling by s alone put every
+    nib path of a close-up (s - 1) / 2 px up and left of its picture (1.1 px at 3.2x), and colour on the far side of a
+    stroke then read as being outside the brush (3.0 promo, the park picture at plan 400)."""
+    scale = np.asarray(scale, float)
+    return np.asarray(points, float) * scale + (scale - 1) / 2
+
+
 def ink_paths(segments, scale=(1., 1.)):
     """Centrelines of the inked strokes of an asset (in drawing order), scaled to a render size."""
-    return [np.asarray(segment['points'], float) * scale for segment in segments if segment['kind'] == 'ink' and len(segment['points']) > 1]
+    return [to_render(segment['points'], scale) for segment in segments if segment['kind'] == 'ink' and len(segment['points']) > 1]
 
 
 CONSTRUCTION_SHARE = .18    # planned construction takes at most this share of a picture's drawing time
@@ -1204,7 +1213,7 @@ def render_at(name, source_path, factor, crop=None, outline_mask_path=None):
     Image.fromarray(final).save(ASSET_DIRECTORY / f'{name}.png')
     np.savez_compressed(ASSET_DIRECTORY / f'{name}.npz', owners=owners_final, **big)
     for segment in metadata['segments']:
-        points = np.asarray(segment['points'], float) * [sx, sy]
+        points = to_render(segment['points'], (sx, sy))
         weights = np.asarray(segment['lengths'], float) * (sx + sy) / 2 if 'lengths' in segment else None
         if segment['kind'] in ('ink', 'sketch') and len(points) > 1 and weights is not None and len(weights) == len(points):
             # A sample every pixel along the inked path (the verifier checks the nib never jumps between samples). The

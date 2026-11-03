@@ -414,7 +414,9 @@ def main(argv=None):
     parser.add_argument('--edit', action='store_true', help='gen: retire the plate and redraw it from the spec\'s "edit"')
     parser.add_argument('--force', action='store_true', help='prompts: rewrite reviewed pictures; gen: colour a plate the gate failed')
     parser.add_argument('--parallel', type=int, default=3)
-    args = parser.parse_args(argv)
+    # Flags may come before or after the names: `gen --edit c02-park` and `gen c02-park --edit` (plain parse_args stops the
+    # names at the first flag and rejected the first form, which the docs gave).
+    args = parser.parse_intermixed_args(argv)
     pipeline = Pipeline(args.job, args.specs)
     if args.command == 'prompts':
         print(json.dumps(pipeline.prompts(args.args or None, args.force), ensure_ascii=False, indent=1))

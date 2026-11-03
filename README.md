@@ -8,7 +8,7 @@ Agent 负责理解内容、写口播、设计分镜和生成插画；本地工�
 
 [看有声样片](#精选样片) · [安装与环境](#安装与环境) · [开始制作](#开始制作) · [全部制作选项](#全部制作选项) · [常见问题](#常见问题) · [关注作者](https://x.com/leo_xiaolei)
 
-> **当前版本：v3.0.1（2026-11-03）**。修复 3.0.0 上色后每块颜色都带斜向笔道的问题：完成色默认平涂，与原图一致，详见 [v3.0.1 发布记录](docs/releases/v3.0.1.md)。3.0 是手绘线的收官版本：先出线稿再上色，笔先起形、按模块描线、用橡皮擦掉起形，再拿马克笔由浅到深上色，墨线有压感、完成色平整干净；水印每页自动避开画面，旁白在封面渐隐时就开口，框里的字按词断行，讲解形式（清单、表格、流程、地图、公式、机制动画）按口播的字出现；一部片只写数据，不再手写脚本（制作工具包）。详见 [v3.0.0 发布记录](docs/releases/v3.0.0.md)；3.0.0 的进展和本版修复的问题见 [#19](https://github.com/threerocks/sweety-handdraw-video/issues/19)。2.0 系列见 [v2.0.2](docs/releases/v2.0.2.md)、[v2.0.1](docs/releases/v2.0.1.md) 与 [v2.0.0](docs/releases/v2.0.0.md) 记录，v1.5 见[其发布记录](docs/releases/v1.5.0.md)。以包内 `VERSION` 和 Git 标签为准。
+> **当前版本：v3.0.2（2026-11-03）**。修复做 3.0 宣传片时遇到的三个小问题：近景重绘的笔尖路径偏了半个放大像素、近方形线稿上色后被压扁、`gen --edit 名字` 的写法被拒，详见 [v3.0.2 发布记录](docs/releases/v3.0.2.md)。v3.0.1 修复了上色后每块颜色都带斜向笔道的问题：完成色默认平涂，与原图一致，见 [v3.0.1 发布记录](docs/releases/v3.0.1.md)。3.0 是手绘线的收官版本：先出线稿再上色，笔先起形、按模块描线、用橡皮擦掉起形，再拿马克笔由浅到深上色，墨线有压感、完成色平整干净；水印每页自动避开画面，旁白在封面渐隐时就开口，框里的字按词断行，讲解形式（清单、表格、流程、地图、公式、机制动画）按口播的字出现；一部片只写数据，不再手写脚本（制作工具包）。详见 [v3.0.0 发布记录](docs/releases/v3.0.0.md)；3.0.0 的进展和本版修复的问题见 [#19](https://github.com/threerocks/sweety-handdraw-video/issues/19)。2.0 系列见 [v2.0.2](docs/releases/v2.0.2.md)、[v2.0.1](docs/releases/v2.0.1.md) 与 [v2.0.0](docs/releases/v2.0.0.md) 记录，v1.5 见[其发布记录](docs/releases/v1.5.0.md)。以包内 `VERSION` 和 Git 标签为准。
 
 ## 精选样片
 
@@ -98,7 +98,7 @@ Agent 负责理解内容、写口播、设计分镜和生成插画；本地工�
 npx skills add threerocks/sweety-handdraw-video --skill sweety-handdraw-video --agent claude-code codex --global --copy --yes
 ```
 
-安装位置：Claude Code 为 `~/.claude/skills/sweety-handdraw-video`，Codex 为 `~/.agents/skills/sweety-handdraw-video`（该命令写入的通用目录）。只装一个宿主时去掉另一个 `--agent` 值；不加 `--global` 则装进当前项目（Claude Code 为 `.claude/skills/`）。此命令安装仓库当前公开内容。需要固定本版时，使用 [v3.0.1 安装包](https://github.com/threerocks/sweety-handdraw-video/releases/download/v3.0.1/sweety-handdraw-video-v3.0.1.zip)；[全部版本](https://github.com/threerocks/sweety-handdraw-video/releases)。下载同页的 `SHA256SUMS.txt`，执行 `shasum -a 256 -c SHA256SUMS.txt` 校验。更新仓库不会自动更新已安装的副本；替换完整 Skill 目录后，读取其中的 `VERSION`，本版应为 `3.0.0`。
+安装位置：Claude Code 为 `~/.claude/skills/sweety-handdraw-video`，Codex 为 `~/.agents/skills/sweety-handdraw-video`（该命令写入的通用目录）。只装一个宿主时去掉另一个 `--agent` 值；不加 `--global` 则装进当前项目（Claude Code 为 `.claude/skills/`）。此命令安装仓库当前公开内容。需要固定本版时，使用 [v3.0.2 安装包](https://github.com/threerocks/sweety-handdraw-video/releases/download/v3.0.2/sweety-handdraw-video-v3.0.2.zip)；[全部版本](https://github.com/threerocks/sweety-handdraw-video/releases)。下载同页的 `SHA256SUMS.txt`，执行 `shasum -a 256 -c SHA256SUMS.txt` 校验。更新仓库不会自动更新已安装的副本；替换完整 Skill 目录后，读取其中的 `VERSION`，本版应为 `3.0.0`。
 
 手动安装：将包内的 `sweety-handdraw-video` **整个文件夹**放入宿主的 Skills 目录，例如 `~/.claude/skills/sweety-handdraw-video`（Claude Code）或 `~/.codex/skills/sweety-handdraw-video`（Codex）。更新前备份旧目录；仅复制 `SKILL.md` 会缺少脚本、素材和内置依赖。手部、画风预览与试听已随包提供（约 38 MB），装好即可离线使用，不再依赖首次下载。
 
@@ -359,7 +359,7 @@ python3 tools/release.py check
 python3 -m unittest discover -s tools -p 'test*.py' -v
 ```
 
-v3.0.1 修复上色条纹，见 [发布记录](docs/releases/v3.0.1.md)；v3.0.0 的变更、前后对比与验收边界见 [其记录](docs/releases/v3.0.0.md)；v2.0.2 见[其记录](docs/releases/v2.0.2.md)，v2.0.1 见[其记录](docs/releases/v2.0.1.md)（包含未公开发布的 [v2.0.0](docs/releases/v2.0.0.md)），v1.5.0 见[其记录](docs/releases/v1.5.0.md)；v1.4.1 新增发布一致性和实际画面范围检查，见 [v1.4.1 记录](docs/releases/v1.4.1.md)。标签触发发布工作流，先完成 macOS / Linux 检查，再从标签提交打包上传 ZIP 与校验文件；稳定标签不移动。
+v3.0.2 修复近景笔尖对齐、近方形线稿和 `gen --edit`，见 [发布记录](docs/releases/v3.0.2.md)；v3.0.1 修复上色条纹，见 [其记录](docs/releases/v3.0.1.md)；v3.0.0 的变更、前后对比与验收边界见 [其记录](docs/releases/v3.0.0.md)；v2.0.2 见[其记录](docs/releases/v2.0.2.md)，v2.0.1 见[其记录](docs/releases/v2.0.1.md)（包含未公开发布的 [v2.0.0](docs/releases/v2.0.0.md)），v1.5.0 见[其记录](docs/releases/v1.5.0.md)；v1.4.1 新增发布一致性和实际画面范围检查，见 [v1.4.1 记录](docs/releases/v1.4.1.md)。标签触发发布工作流，先完成 macOS / Linux 检查，再从标签提交打包上传 ZIP 与校验文件；稳定标签不移动。
 
 v1.3 记录：158 项回归通过（1 项平台用例跳过）、离线冒烟短片通过、安装包 843 个文件、49.4 MB 通过核验；蛇故事以 v1.3 流程端到端重做（揭示模式），软件工具片以修复后的引擎重做（18 幅插画全部逐笔绘制、无淡入，终帧与原图一致）；2026-10-17 增补宽墨线角点覆盖、混音电平、数字比较与填充最短时长修复，并新增配乐自动准备。相应成片工程检查、声音门禁与字幕同步均通过。该结果不能替代视频观感、故事事实、听感或学习效果验收。更多记录见 [验证范围](docs/validation.md)。
 

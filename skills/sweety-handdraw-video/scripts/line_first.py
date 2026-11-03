@@ -207,6 +207,22 @@ def drop_specks(plate_rgb, moved, area):
     return plate_rgb, moved, int(marks.sum()), int(small.sum())
 
 
+def fits(colour, size):
+    """The colour edit on the plate's canvas: [(how, RGBA image)]. Stretched to the plate's size, and, when the aspects
+    differ, also the plate's box cut from the middle. The image route pads a reference onto the shape it asks for (a
+    1199 x 1312 plate counts as square and goes on a square canvas) and the tool returns that whole canvas: stretching it
+    squashed every line (3.0 promo: 68.6% of the lines kept)."""
+    width, height = size
+    found = [('stretched', colour.resize(size, Image.Resampling.LANCZOS) if colour.size != size else colour)]
+    wide, tall = colour.size
+    if abs(wide / tall - width / height) > .01 * width / height:
+        scale = min(wide / width, tall / height)
+        left, top = (wide - width * scale) / 2, (tall - height * scale) / 2
+        box = (left, top, left + width * scale, top + height * scale)
+        found.append(('centre', colour.resize(size, Image.Resampling.LANCZOS, box=box)))
+    return found
+
+
 def run(job, plate_path, colour_path, out_path, mask_path=None, specks=0):
     job = Path(job).resolve()
     resolve = lambda path: Path(path) if Path(path).is_absolute() else job / path
@@ -218,10 +234,14 @@ def run(job, plate_path, colour_path, out_path, mask_path=None, specks=0):
     plate_rgb = (plate_rgb[..., :3] * (plate_rgb[..., 3:] / 255.) + 255 * (1 - plate_rgb[..., 3:] / 255.)).astype(np.uint8)
     colour = Image.open(colour_path).convert('RGBA')
     resized = colour.size != plate_image.size
-    if resized:
-        colour = colour.resize(plate_image.size, Image.Resampling.LANCZOS)
-    colour_rgba = np.array(colour)
-    moved, plate, measures = register(plate_rgb, colour_rgba)
+    # Every way the edit may sit on the plate's canvas; the one that keeps the most lines wins (a tie keeps the stretch).
+    trials = []
+    for how, fitted in fits(colour, plate_image.size):
+        colour_rgba = np.array(fitted)
+        moved, plate, measures = register(plate_rgb, colour_rgba)
+        trials.append((measures['kept_lines'], -len(trials), how, colour_rgba, moved, plate, measures))
+    _, _, fit, colour_rgba, moved, plate, measures = max(trials, key=lambda trial: trial[:2])
+    measures['colour_fit'] = fit
     if specks:
         plate_rgb, moved, removed_px, removed_marks = drop_specks(plate_rgb, moved, specks)
         plate = luminance(plate_rgb) < PLATE_INK

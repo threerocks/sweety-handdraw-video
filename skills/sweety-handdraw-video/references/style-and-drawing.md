@@ -156,7 +156,7 @@ python3 scripts/drawing_contract.py JOB JOB/design/drawing-plan.json
 
    画面里有人时，按 drawing-plan 中该人物的 `colours`，在提示词里逐人写出肤色、发色和衣服颜色，例如“The young mother: light skin #EDC3A0, black hair #2B2422, warm-white gown #FBF7EF”。只给色板不够：色板里有两种肤色时，模型会随便挑一种。服装和角色参考图不同时（换了便装、退休在家），上色这一步不要附参考图，否则会被带回参考图的服装和发色。build 会实测人物颜色，见[检查与返工](quality-gates.md)。
 4. **配准**。`line_first.py JOB 线稿 上色图 --out inputs/art/<名>.png` 做四件事：
-   - 把上色图对齐到线稿；
+   - 把上色图对齐到线稿。上色图与线稿比例不同时（出图时线稿被补边成了方图或竖图），既试整张拉伸、也试从正中裁回线稿那一块，取保留线条多的一种，报告里的 `colour_fit` 写 `stretched` 或 `centre`；
    - 量线条保留率、偏移和新增线条，不合格就退出，并给出上色编辑的 `prompt_fix`；
    - 把线稿的线叠到颜色上，写出源图；
    - 写出同尺寸的 `<名>-outline.png`，以及 `<名>.line-first.json` 报告和 `<名>.line-first.jpg` 核对图（线稿 | 上色图 | 重合：黑 = 保留，红 = 丢失，蓝 = 新增 | 源图）。
