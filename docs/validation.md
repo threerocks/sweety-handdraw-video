@@ -1,3 +1,10 @@
+# v3.0.1 上色条纹（2026-11-03）
+
+- 回归：Skill 虚拟环境 399 项通过（1 项平台用例跳过），tools 测试与离线冒烟短片通过；`tools/release.py check` 通过。新增 `test_v3_media.test_default_marker_colour_is_the_source_with_no_lanes`，`test_v3_marker_leak` 的完成图检查加上默认设置。
+- 前后对比（3.0 宣传片三张插画，同一时刻取帧，修复前为 3.0.0 默认的叠涂马克笔）：修复前，被笔道改变超过 2 个灰度的上色像素占 87.3%–92.9%；可与原图逐像素对齐的一张，与原图差超过 2 的上色像素 92.2% → 0，修复后 100% 与原图相同。
+- 宣传片与三部样片重新出片，build / render / verify / finalize 通过，字幕最大偏差 0.06–0.14 秒。
+- 以上是工程检查。连续观感与听感需要人工观看和试听。
+
 # v3.0.0 收官版（2026-11-02）
 
 - 回归：Skill 虚拟环境 398 项通过（1 项平台用例跳过），tools 测试与离线冒烟短片通过；`validate_package` 48.69 MB（上限 50 MB）；`tools/release.py check` 通过。新增 `test_v3_final.py`（水印选位与淡入淡出、旁白提前开口与结尾落定、推镜避让屏幕标题、屏幕层写字保持静止、标题轮流出场阈值、读法写法、导演检查新项）、`test_v3_text_breaks.py`、`test_v3_media.py`、`test_production_kit.py`、`test_v3_budget_gaps.py`、`test_v3_person_colours.py`。

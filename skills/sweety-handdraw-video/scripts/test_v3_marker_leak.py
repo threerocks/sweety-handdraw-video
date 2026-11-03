@@ -167,18 +167,22 @@ class MarkerFilmTests(unittest.TestCase):
         np.testing.assert_array_equal(illustration_layers.compose(layers, np.float32(1.)), layers['final'])
 
     def test_the_figure_is_coloured_in_its_own_pass(self):
-        for texture in (True, {'marker': 'flat'}):
+        for texture in (True, {'marker': 'layered'}):
             with self.subTest(texture=texture):
-                metadata, layers = self.build('layered' if texture is True else 'flat', texture)
+                metadata, layers = self.build('default' if texture is True else 'layered', texture)
                 self.assertEqual(metadata['colouring'], 'markers')
                 self.check_figure(layers)
 
     def test_the_finished_picture_is_still_the_source(self):
         _, flat = self.build('flat', {'ink': 'none', 'marker': 'flat'})
-        _, layered = self.build('layered')
+        _, default = self.build('default')
+        _, layered = self.build('layered', {'marker': 'layered'})
         source = np.array(Image.open(self.source)).astype(int)
         away = ~ndimage.binary_dilation(np.array(Image.open(self.outline)) > 0, iterations=4)
         np.testing.assert_array_equal(flat['final'][away, :3].astype(int), source[away, :3])
+        # By default the finished colour is the source's, pixel for pixel: no marker lanes striping the fills (3.0.0
+        # multiplied layered lanes into every picture and every film showed diagonal stripes).
+        np.testing.assert_array_equal(default['final'][away, :3].astype(int), source[away, :3])
         painted = away & (flat['alpha'] > .99)
         self.assertLess(float(illustration_layers.delta_e(layered['final'], flat['final'])[painted].mean()), 3.)
 

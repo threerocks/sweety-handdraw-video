@@ -730,20 +730,25 @@ def scale_times(fields, ending):
             for key, value in fields.items()}
 
 
-TEXTURE = {'ink': ('pressure', 'none'), 'marker': ('layered', 'flat')}   # first value is the default
+TEXTURE = {'ink': ('pressure', 'none'), 'marker': ('flat', 'layered')}   # the choices of each key
+TEXTURE_ON = {'ink': 'pressure', 'marker': 'flat'}    # default (true): pressure ink; the finished colour is the source's
+TEXTURE_OFF = {'ink': 'none', 'marker': 'flat'}       # false: the even technical pen of 2.x
+# A layered marker multiplies nib-wide lanes into every finished colour (overlaps ~9% darker). On a film's flat fills they
+# read as diagonal stripes over the whole picture, so it is opt-in only: {"marker": "layered"}.
 
 
 def texture_option(drawing):
-    """drawing.texture: real-media texture of a drawn picture. {"ink": "pressure" | "none", "marker": "layered" | "flat"};
-    true (default) is pressure ink and layered markers, false (or "none") the even technical pen and flat marker of 2.x."""
+    """drawing.texture: real-media texture of a drawn picture. {"ink": "pressure" | "none", "marker": "flat" | "layered"};
+    true (default) is pressure ink and flat marker colour (exactly the source's), false (or "none") the even technical
+    pen of 2.x. "layered" leaves visible marker lanes in the finished colour and is never on by default."""
     value = (drawing or {}).get('texture', True)
     if value is True or value is None:
-        return {key: choices[0] for key, choices in TEXTURE.items()}
+        return dict(TEXTURE_ON)
     if value is False or value in ('none', 'flat'):
-        return {key: choices[1] for key, choices in TEXTURE.items()}
+        return dict(TEXTURE_OFF)
     if not isinstance(value, dict) or set(value) - set(TEXTURE):
         raise ValueError('drawing.texture must be true, false or {"ink": "pressure"|"none", "marker": "layered"|"flat"}')
-    result = {key: value.get(key, choices[0]) for key, choices in TEXTURE.items()}
+    result = {key: value.get(key, TEXTURE_ON[key]) for key in TEXTURE}
     for key, choices in TEXTURE.items():
         if result[key] not in choices:
             raise ValueError(f'drawing.texture.{key} must be ' + ' or '.join(f'"{choice}"' for choice in choices))

@@ -1,7 +1,7 @@
 """v3 drawing media: the colouring front is drawn at display resolution and anti-aliased (a close-up no longer scales up
 the plan's pixel staircase while marker colour is laid down), and real-media texture (drawing.texture): pressure ink
-(free ends land and lift thin, the body thins a little, the ink is a little lighter in places) and layered markers
-(lanes of a real nib along the sweep, darker where two coats overlap, a little pooling at a lane's edge)."""
+(free ends land and lift thin, the body thins a little, the ink is a little lighter in places) and, opt-in only, layered
+markers (lanes of a real nib along the sweep, darker where two coats overlap, a little pooling at a lane's edge)."""
 import json
 import tempfile
 import types
@@ -130,10 +130,21 @@ class MediaTests(unittest.TestCase):
         _, ink_only = self.build('ink', texture={'ink': 'pressure', 'marker': 'flat'})
         np.testing.assert_array_equal(ink_only['shade_rgb'], off['shade_rgb'])
 
-    def test_texture_stays_within_its_tolerance(self):
-        # The finished picture is no longer the source exactly; these bounds are what the texture may do to it.
+    def test_default_marker_colour_is_the_source_with_no_lanes(self):
+        # 3.0.0 layered marker lanes by default: every film's fills showed diagonal stripes. The default is flat now.
+        metadata, on = self.build('on')
+        self.assertEqual(metadata['texture'], {'ink': 'pressure', 'marker': 'flat'})
+        self.assertNotIn('paint_tone', np.load(self.root / 'on.npz').files)
         _, off = self.build('off', texture=False)
-        _, on = self.build('on')
+        np.testing.assert_array_equal(on['shade_rgb'], off['shade_rgb'])
+        painted = (off['alpha'] > .99) & ~ndimage.binary_dilation(off['line_alpha'] > 0, iterations=4)
+        np.testing.assert_array_equal(on['final'][painted], off['final'][painted])
+
+    def test_texture_stays_within_its_tolerance(self):
+        # With layered markers (opt-in) the finished picture is no longer the source exactly; these bounds are what the
+        # texture may do to it.
+        _, off = self.build('off', texture=False)
+        _, on = self.build('on', texture={'marker': 'layered'})
         painted = (off['alpha'] > .99) & (off['line_alpha'] < .02)
         difference = illustration_layers.delta_e(on['final'], off['final'])
         self.assertLess(float(difference[painted].mean()), 3.)              # just noticeable on average, no more
@@ -183,8 +194,12 @@ class MediaTests(unittest.TestCase):
             stroke_assets.texture_option({'texture': {'ink': 'bristly'}})
         with self.assertRaisesRegex(ValueError, 'drawing.texture'):
             stroke_assets.texture_option({'texture': {'paper': 'rough'}})
-        self.assertEqual(stroke_assets.texture_option({}), {'ink': 'pressure', 'marker': 'layered'})
+        # Flat marker colour by default: layered lanes stripe every fill, so they are opt-in only.
+        self.assertEqual(stroke_assets.texture_option({}), {'ink': 'pressure', 'marker': 'flat'})
+        self.assertEqual(stroke_assets.texture_option({'texture': True}), {'ink': 'pressure', 'marker': 'flat'})
         self.assertEqual(stroke_assets.texture_option({'texture': False}), {'ink': 'none', 'marker': 'flat'})
+        self.assertEqual(stroke_assets.texture_option({'texture': {'marker': 'layered'}}), {'ink': 'pressure', 'marker': 'layered'})
+        self.assertEqual(stroke_assets.texture_option({'texture': {'ink': 'none'}}), {'ink': 'none', 'marker': 'flat'})
         import video_job
         action = {'type': 'illustration', 'source': 'source.png', 'width': 300, 'height': 220, 'x': 0, 'y': 0}
         keys = []
