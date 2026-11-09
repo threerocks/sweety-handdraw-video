@@ -40,13 +40,23 @@ BG = np.array([233, 228, 219], float)
 INK = (43, 38, 34)
 
 BUDGET = {'wash': 4.6, 'sketch': 8.5, 'block': 11.5, 'form': 10.0, 'refine': 6.5, 'detail': 5.5, 'accent': 7.0, 'sign': 3.0}
-BUDGET_V2 = {'wash': 4.0, 'sketch': 8.0, 'block': 9.0, 'form': 8.5, 'blend': 3.5, 'refine': 6.0, 'texture': 7.5, 'detail': 5.0,
-             'polish': 4.5, 'accent': 6.5, 'sign': 3.0}
+BUDGET_V2 = {'wash': 3.5, 'sketch': 7.0, 'block': 8.0, 'form': 7.5, 'blend': 3.0, 'refine': 5.5, 'texture': 6.5, 'detail': 4.5,
+             'polish': 4.0, 'feather': 3.0, 'lines': 0., 'accent': 5.5, 'dianjing': 0., 'sign': 3.0}
+ZOOM = 2.0              # camera push-in on the face while the features are painted
+ZOOM_EASE = 1.0         # seconds to push in or pull out
+ZOOM_GAP = 10.          # focal stretches closer than this stay in one close-up (the passes between are on the face too)
+FOLLOW = .3             # in a close-up the camera drifts this share of the way toward the (smoothed) brush
 JUMP = 200.             # px: a lift longer than this is never crossed faster than HAND_PX a frame (at the min-jerk peak);
 HAND_PX = 240.          # shorter hops inside one area may share a frame, as a time-lapse shows them
 STROKE_PX = 700.        # a brush stroke's peak travel per frame: only the most extreme sweeps are held back
 MAX_TRIPS = 3           # visible palette visits per pass (the rest of the new mixes appear as cuts)
 RAMP_STROKES = 8        # strokes over which a pass speeds up from the slow start
+SLOW_PASSES = {'detail', 'polish', 'lines', 'accent', 'dianjing'}   # in these passes the focal features are painted at life pace
+FOCAL_LAPSE = 1.        # the eyes' finishing work (polish, eyelid lines, 点睛) at a person's real speed (user, 2026-11-10:
+FEATURE_LAPSE = 3.      # 视觉重点不加速); the other features (mouth, nose, lenses) at three times life pace
+LIFE_PASSES = {'polish', 'lines', 'dianjing'}
+FEATURE_CAP = 8.        # seconds a pass may spend on the non-eye features (their pace rises above 3x to fit)
+EARLY_LAPSE = 5.        # the features' first detail round: still clearly stroke by stroke, not yet the finishing work
 SLOW_LAPSE = 2.         # a pass starts at about twice life speed
 TRIP_LAPSE = 9.         # palette visits are shown only when the lapse is gentler than this
 SWIRL = .55             # seconds at life pace to work a new mix on the palette
@@ -82,7 +92,7 @@ def lapses(evs, cruise):
     out, strokes = [], 0
     for e in evs:
         lap = cruise * (r + (1 - r) * smooth(strokes / ramp))
-        out.append(min(lap, 1.6) if e.get('slow') else lap)    # the last touches in the eyes are shown near life pace
+        out.append(min(lap, e['slow']) if e.get('slow') else lap)    # focal features: life pace or close to it
         strokes += e['kind'] == 'stroke'
     return out
 
@@ -294,12 +304,57 @@ def base_frame(reference, watermark=True):
     d.text((CX, 38), '油画肖像写生', font=font(FONT_HAND, 52), fill=INK)
     if not watermark:
         return np.asarray(img).copy()
+    wm_layer = watermark_layer()
+    img.paste(wm_layer, (0, 0), wm_layer)
+    return np.asarray(img).copy()
+
+
+def watermark_layer():
     wm = font(FONT_SANS, 36)
     wm_layer = Image.new('RGBA', (FW, FH), (0, 0, 0, 0))
     ImageDraw.Draw(wm_layer).text((FW - 80, 52), WATERMARK, font=wm, fill=INK + (int(255 * .3),), anchor='ra',
                                   stroke_width=3, stroke_fill=tuple(BG.astype(int)) + (int(255 * .3),))
-    img.paste(wm_layer, (0, 0), wm_layer)
-    return np.asarray(img).copy()
+    return wm_layer
+
+
+def camera_track(events, nframes, centre, tips=None):
+    """Per-frame zoom and centre: push in on the face while focal features are painted (stretches closer than ZOOM_GAP
+    merge into one close-up), ease in and out over ZOOM_EASE, and pull back for everything else."""
+    spans = []
+    for e in events:
+        if e.get('slow') and e['kind'] in ('stroke', 'travel'):
+            if spans and e['v0'] - spans[-1][1] < ZOOM_GAP:
+                spans[-1][1] = e['v1']
+            else:
+                spans.append([e['v0'], e['v1']])
+    t = np.arange(nframes) / FPS
+    f = np.zeros(nframes)
+    for a, b in spans:
+        if b - a < 1.5:
+            continue
+        up = np.clip((t - (a - ZOOM_EASE)) / ZOOM_EASE, 0, 1)
+        down = np.clip(((b + .4 + ZOOM_EASE) - t) / ZOOM_EASE, 0, 1)
+        f = np.maximum(f, np.minimum(up, down))
+    f = f * f * (3 - 2 * f)
+    zoom = 1 + (ZOOM - 1) * f
+    cx = FW / 2 + (centre[0] - FW / 2) * f
+    cy = FH / 2 + (centre[1] - FH / 2) * f
+    if tips is not None:     # drift a little toward where the brush works, smoothed over ~1.5 s
+        from scipy import ndimage
+        tx = ndimage.gaussian_filter1d(np.clip(tips[:, 0], 0, FW), FPS * .7, mode='nearest')
+        ty = ndimage.gaussian_filter1d(np.clip(tips[:, 1], 0, FH), FPS * .7, mode='nearest')
+        cx = cx + FOLLOW * f * (tx - centre[0])
+        cy = cy + FOLLOW * f * (ty - centre[1])
+    return zoom, cx, cy, spans
+
+
+def apply_camera(frame, z, cx, cy):
+    if z <= 1.001:
+        return frame
+    w, h = FW / z, FH / z
+    x0 = min(max(cx - w / 2, 0), FW - w)
+    y0 = min(max(cy - h / 2, 0), FH - h)
+    return np.asarray(Image.fromarray(frame).resize((FW, FH), Image.BICUBIC, box=(x0, y0, x0 + w, y0 + h)))
 
 
 def pass_row(labels, current):
@@ -328,17 +383,33 @@ def build(plan, palette):
     for pi, ps in enumerate(passes):
         evs = [dict(kind='pause', real=1.2 if pi else .6, pi=pi)]
         last_key = None
+        focal_trip = False
         for st in ps['strokes']:
             pts, s, *_ = geometry(st)
             fp = pts + [CX, CY]
             key = (pi, st['mix'])
-            slow = st['mix'] >= 900
+            slow = 0.
+            if st['mix'] >= 900 or (st.get('focal') and ps['name'] in SLOW_PASSES):
+                slow = FOCAL_LAPSE if (st.get('eye') and ps['name'] in LIFE_PASSES) or st['mix'] >= 900 else FEATURE_LAPSE
+                if ps['name'] == 'detail':
+                    slow = EARLY_LAPSE
+                elif st.get('cut'):           # cutting in around a line is cleanup, not the line itself
+                    slow = FEATURE_LAPSE
             if key != last_key:
-                evs.append(dict(kind='mix', pi=pi, rgb=st['mix_rgb'], first=last_key is None or slow, real=0., slow=slow))
+                # one visible palette visit when the focal work of a pass begins; later mixes in it are picked up off-screen
+                first = last_key is None or (slow and not focal_trip)
+                focal_trip = focal_trip or bool(slow and first)
+                evs.append(dict(kind='mix', pi=pi, rgb=st['mix_rgb'], first=first, real=0., slow=slow))
                 last_key = key
             evs.append(dict(kind='travel', pi=pi, b=fp[0].copy(), real=0., slow=slow))
-            evs.append(dict(kind='stroke', pi=pi, st=st, path=fp, s=s, L=float(s[-1]), real=stroke_seconds(st, s[-1]) + .25 * slow,
-                            rgb=st['rgb'], slow=slow))
+            evs.append(dict(kind='stroke', pi=pi, st=st, path=fp, s=s, L=float(s[-1]), real=stroke_seconds(st, s[-1]) + .08 * bool(slow),
+                            rgb=st["rgb"], slow=slow, focal=bool(slow)))
+        for base in (FEATURE_LAPSE, EARLY_LAPSE):
+            others = [e for e in evs if e.get('slow') == base]
+            need = sum(stroke_seconds(e['st'], e['L']) + .25 for e in others if e['kind'] == 'stroke') / base
+            if need > FEATURE_CAP:
+                for e in others:
+                    e['slow'] = base * need / FEATURE_CAP
         timeline.append(evs)
 
     def settle(evs, tip, decide):
@@ -354,7 +425,7 @@ def build(plan, palette):
                 if 'smear_pts' not in e:
                     e['smear_pts'] = palette.slot()
                 sp = np.array(e['smear_pts']) + [TRAY[0], TRAY[1]]
-                show = e['first'] or (lap is not None and lap[k] <= TRIP_LAPSE and shown < MAX_TRIPS)
+                show = e['first'] or (not e['slow'] and lap is not None and lap[k] <= TRIP_LAPSE and shown < MAX_TRIPS)
                 e['trip'] = bool(show) if decide is not None else e.get('trip', e['first'])
                 shown += e['trip']
                 if e['trip']:
@@ -379,9 +450,10 @@ def build(plan, palette):
     for pi, evs in enumerate(timeline):
         name = passes[pi]['name']
         settle(evs, tip, None)
-        lap = fit(evs, BUDGET.get(name, 5.))
+        focal = lambda: sum(e['real'] / e['slow'] for e in evs if e.get('slow'))   # life-pace time comes on top of the budget
+        lap = fit(evs, BUDGET.get(name, 5.) + focal())
         settle(evs, tip, lap)
-        lap = fit(evs, BUDGET.get(name, 5.))
+        lap = fit(evs, BUDGET.get(name, 5.) + focal())
         tip = settle(evs, tip, None)
         for e, l, v in zip(evs, lap, video_time(evs, lap)):
             e['video'] = v
@@ -430,7 +502,10 @@ def main():
     if any(p['name'] in ('texture', 'polish') for p in plan['passes']):
         BUDGET.clear()
         BUDGET.update(BUDGET_V2)
-    base = base_frame(reference)
+    base = base_frame(reference, watermark=False)
+    wm_layer = watermark_layer()
+    wm_alpha = np.asarray(wm_layer)[..., 3:4] / 255.
+    wm_rgb = np.asarray(wm_layer)[..., :3].astype(float)
     events = build(plan, palette)
     # intro: the hand comes in from the lower right; outro: it leaves and the painting holds
     first_tip = next(e['b'] for e in events if e['kind'] == 'travel')
@@ -462,6 +537,9 @@ def main():
         print(f"{p:8s} {v['strokes']:4d} strokes  {v['video']:5.2f}s video  lapse {min(v['lapse']):.1f}-{max(v['lapse']):.1f}  "
               f"trips {sum(1 for e in events if e['kind'] == 'mix' and e.get('trip') and plan['passes'][e['pi']]['name'] == p)}")
     print(f'total {t:.2f}s, {nframes} frames')
+    face = plan.get('face') or plan['focus'][0][:4]
+    zoom, cam_x, cam_y, spans = camera_track(events, nframes, (CX + face[0] * W, CY + face[1] * H))
+    print('close-ups', [(round(a, 1), round(b, 1)) for a, b in spans if b - a >= 1.5])
 
     out_path = Path(args.out) if args.out else d / 'film.mp4'
     stills = d / 'stills'
@@ -594,6 +672,8 @@ def main():
         strength = .6 if (paint_rgb is not None and e.get('st', {}).get('medium') == 'pencil') else .85
         frame = hand.draw(frame, tip, lift, paint_rgb, angle, strength)
         tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi'])])
+        frame = apply_camera(frame, zoom[f], cam_x[f], cam_y[f])
+        frame = (frame * (1 - wm_alpha) + wm_rgb * wm_alpha).astype(np.uint8)
         ff.stdin.write(frame.tobytes())
         if args.stills and f % int(args.stills * FPS) == 0:
             Image.fromarray(frame).save(stills / f'{f:05d}.jpg', quality=88)
