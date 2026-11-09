@@ -40,6 +40,8 @@ BG = np.array([233, 228, 219], float)
 INK = (43, 38, 34)
 
 BUDGET = {'wash': 4.6, 'sketch': 8.5, 'block': 11.5, 'form': 10.0, 'refine': 6.5, 'detail': 5.5, 'accent': 7.0, 'sign': 3.0}
+BUDGET_V2 = {'wash': 4.0, 'sketch': 8.0, 'block': 9.0, 'form': 8.5, 'blend': 3.5, 'refine': 6.0, 'texture': 7.5, 'detail': 5.0,
+             'polish': 4.5, 'accent': 6.5, 'sign': 3.0}
 JUMP = 200.             # px: a lift longer than this is never crossed faster than HAND_PX a frame (at the min-jerk peak);
 HAND_PX = 240.          # shorter hops inside one area may share a frame, as a time-lapse shows them
 STROKE_PX = 700.        # a brush stroke's peak travel per frame: only the most extreme sweeps are held back
@@ -422,8 +424,12 @@ def main():
     rng = np.random.default_rng(3)
     palette = Palette(rng)
     hand = Hand()
-    labels = [p['label'] for p in plan['passes']]
+    labels = list(dict.fromkeys(p['label'] for p in plan['passes']))     # passes sharing a name share one label
+    label_of = [labels.index(p['label']) for p in plan['passes']] + [len(labels)]
     rows = [pass_row(labels, k) for k in range(len(labels) + 1)]
+    if any(p['name'] in ('texture', 'polish') for p in plan['passes']):
+        BUDGET.clear()
+        BUDGET.update(BUDGET_V2)
     base = base_frame(reference)
     events = build(plan, palette)
     # intro: the hand comes in from the lower right; outro: it leaves and the painting holds
@@ -432,8 +438,8 @@ def main():
     events.insert(0, dict(kind='enter', pi=0, a=off, b=first_tip, video=args.intro, real=args.intro, lapse=1.))
     events = [dict(kind='hold', pi=0, video=.5, pos=off)] + events
     last_tip = next(e['path'][-1] for e in reversed(events) if e['kind'] == 'stroke')
-    events.append(dict(kind='leave', pi=len(labels) - 1, a=last_tip, b=off, video=1.1, lapse=1.))
-    events.append(dict(kind='hold', pi=len(labels), video=args.outro, pos=off))
+    events.append(dict(kind='leave', pi=len(plan['passes']) - 1, a=last_tip, b=off, video=1.1, lapse=1.))
+    events.append(dict(kind='hold', pi=len(plan['passes']), video=args.outro, pos=off))
     t = 0.
     for e in events:
         e['v0'] = t
@@ -447,7 +453,7 @@ def main():
             p = plan['passes'][e['pi']]['name']
             summary.setdefault(p, dict(strokes=0, video=0., lapse=[]))
             summary[p]['strokes'] += 1
-        if e.get('pi') is not None and e['kind'] not in ('hold', 'enter', 'leave') and e['pi'] < len(labels):
+        if e.get('pi') is not None and e['kind'] not in ('hold', 'enter', 'leave') and e['pi'] < len(plan['passes']):
             p = plan['passes'][e['pi']]['name']
             summary.setdefault(p, dict(strokes=0, video=0., lapse=[]))
             summary[p]['video'] += e['video']
@@ -576,7 +582,7 @@ def main():
         frame[tray_y:tray_y + th, tray_x:tray_x + tw] = (region * (1 - m) + tray * m).astype(np.uint8)
         # pass label
         pil = Image.fromarray(frame)
-        row = rows[min(e['pi'], len(rows) - 1)]
+        row = rows[label_of[min(e['pi'], len(label_of) - 1)]]
         pil.paste(row, (CX, 98), row)
         frame = np.asarray(pil).copy()
         # hand: a right forearm leans more on the left of the canvas; a little wrist roll with motion
