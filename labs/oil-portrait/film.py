@@ -43,6 +43,8 @@ BUDGET = {'wash': 4.6, 'sketch': 8.5, 'block': 11.5, 'form': 10.0, 'refine': 6.5
 BUDGET_V2 = {'wash': 3.5, 'sketch': 7.0, 'block': 8.0, 'form': 7.5, 'blend': 3.0, 'refine': 5.5, 'texture': 6.5, 'detail': 4.5,
              'polish': 4.0, 'feather': 3.0, 'lines': 0., 'accent': 5.5, 'dianjing': 0., 'sign': 3.0}
 ZOOM = 2.0              # camera push-in on the face while the features are painted
+HEADER, HEADER_FADE = 140, 24   # rows of title and pass labels kept fixed in a close-up, and their soft lower edge
+LABELS_BOTTOM = 142     # last frame row of the pass labels
 ZOOM_EASE = 1.0         # seconds to push in or pull out
 ZOOM_GAP = 10.          # focal stretches closer than this stay in one close-up (the passes between are on the face too)
 FOLLOW = .3             # in a close-up the camera drifts this share of the way toward the (smoothed) brush
@@ -353,7 +355,7 @@ def apply_camera(frame, z, cx, cy):
         return frame
     w, h = FW / z, FH / z
     x0 = min(max(cx - w / 2, 0), FW - w)
-    y0 = min(max(cy - h / 2, 0), FH - h)
+    y0 = min(max(cy - h / 2, LABELS_BOTTOM - HEADER / z), FH - h)   # the labels' own rows stay under the fixed header
     return np.asarray(Image.fromarray(frame).resize((FW, FH), Image.BICUBIC, box=(x0, y0, x0 + w, y0 + h)))
 
 
@@ -539,6 +541,7 @@ def main():
     print(f'total {t:.2f}s, {nframes} frames')
     face = plan.get('face') or plan['focus'][0][:4]
     zoom, cam_x, cam_y, spans = camera_track(events, nframes, (CX + face[0] * W, CY + face[1] * H))
+    header_mask = np.r_[np.ones(HEADER), np.linspace(1, 0, HEADER_FADE)][:, None] * np.ones((1, FW))
     print('close-ups', [(round(a, 1), round(b, 1)) for a, b in spans if b - a >= 1.5])
 
     out_path = Path(args.out) if args.out else d / 'film.mp4'
@@ -672,7 +675,13 @@ def main():
         strength = .6 if (paint_rgb is not None and e.get('st', {}).get('medium') == 'pencil') else .85
         frame = hand.draw(frame, tip, lift, paint_rgb, angle, strength)
         tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi'])])
+        header = frame[:HEADER + HEADER_FADE].astype(float) if zoom[f] > 1.001 else None
         frame = apply_camera(frame, zoom[f], cam_x[f], cam_y[f])
+        if header is not None:     # in a close-up the title and pass labels stay put at their normal size, on paper
+            k = ((zoom[f] - 1) / (ZOOM - 1) * header_mask)[..., None]
+            top = frame[:HEADER + HEADER_FADE].astype(float)
+            frame = frame.copy()
+            frame[:HEADER + HEADER_FADE] = (top * (1 - k) + header * k).astype(np.uint8)
         frame = (frame * (1 - wm_alpha) + wm_rgb * wm_alpha).astype(np.uint8)
         ff.stdin.write(frame.tobytes())
         if args.stills and f % int(args.stills * FPS) == 0:
