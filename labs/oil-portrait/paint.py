@@ -329,9 +329,9 @@ def plan_layer(spec, ref_rgb, canvas, focus, rng, start_tip):
     diff = np.linalg.norm(ref_lab - canvas_lab, axis=-1)
     thresh = spec['T'] / np.clip(focus, .05, 1) ** spec['gamma']
     if spec.get('only'):           # a pass for one region (e.g. hair and clothes): elsewhere nothing exceeds the threshold
-        inside = focus_map([e + [1.] for e in spec['only']], 0) > .9
-        for e in spec.get('exclude', []):
-            inside &= ~(focus_map([e + [1.]], 0) > .9)
+        inside = focus_map([list(REGIONS[spec['only']]) + [1.]], 0) > .9
+        for name in spec.get('exclude', []):
+            inside &= ~(focus_map([list(REGIONS[name]) + [1.]], 0) > .9)
         thresh = np.where(inside, thresh, 1e9)
     step = max(2, int(round(spec.get('grid', 1.) * R)))
     cands = []
@@ -573,8 +573,7 @@ LAYERS_V2 = [
          soft=.5, **{'break': 14}),
     # hair strands and knit: long thin strokes along the flow, in their own colours, only on the figure outside the face
     dict(name='texture', label='深入刻画', R=3.6, T=5.5, maxlen=32, minlen=5, fc=.8, mixes=18, gamma=0., medium='oil_fine', own=.85,
-         blur=.35, soft=.15, stop=False, press=(.35, .15), cover=1.6, only=[[0.42, 0.55, 0.40, 0.50]],
-         exclude=[[0.41, 0.37, 0.15, 0.16]], **{'break': 11}),
+         blur=.35, soft=.15, stop=False, press=(.35, .15), cover=1.6, only='figure', exclude=['face'], **{'break': 11}),
     dict(name='detail', label='细节', R=4.2, T=5.5, maxlen=9, minlen=2, fc=.6, mixes=18, gamma=1.8, medium='oil_fine', own=.75,
          blur=.4, soft=.3, **{'break': 12}),
     dict(name='polish', label='细节', R=2.8, T=5, maxlen=7, minlen=2, fc=.6, mixes=18, gamma=3.2, medium='oil_fine', own=.85,
@@ -583,6 +582,9 @@ LAYERS_V2 = [
          blur=.3, dabs=True, press=(.6, .4), **{'break': 10}),
 ]
 LAYERS = LAYERS_V1
+# Ellipses [cx, cy, rx, ry] (canvas fractions) of the face and of the whole figure (head, hair, body): the hair/clothes
+# texture pass works on the figure outside the face, the large softening brush on everything outside the figure.
+REGIONS = {'face': (0.41, 0.37, 0.15, 0.16), 'figure': (0.42, 0.55, 0.40, 0.50)}
 
 
 def eye_touches(ref, eyes, rng):
@@ -618,11 +620,14 @@ def focus_map(ellipses, floor=.12):
     return np.clip(f, floor, 1)
 
 
-def load_subject(path):
+CROP_TOP = .35     # where the canvas window sits in a taller picture (0 = top, 1 = bottom)
+
+
+def load_subject(path, crop_top=None):
     img = Image.open(path).convert('RGB')
     w0, h0 = img.size
     crop_h = round(w0 * H / W)
-    top = int((h0 - crop_h) * .35)
+    top = int((h0 - crop_h) * (CROP_TOP if crop_top is None else crop_top))
     sub = img.crop((0, top, w0, top + crop_h)).resize((W, H), Image.LANCZOS)
     return np.asarray(sub, float) / 255, (top, crop_h, w0), (h0, w0)
 
@@ -666,7 +671,7 @@ def plan(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes=No
         if strokes:
             tip = strokes[-1]['points'][-1]
         if spec.get('blend_after'):
-            background = ~(focus_map([[0.42, 0.55, 0.40, 0.50, 1.]], 0) > .9)
+            background = ~(focus_map([list(REGIONS['figure']) + [1.]], 0) > .9)
             strokes = blend_strokes(ref, canvas, focus, rng, R=20., start_tip=tip, region=background)
             strokes += blend_strokes(ref, canvas, focus, rng, start_tip=strokes[-1]['points'][-1] if strokes else tip)
             run('blend', '柔化', strokes)
@@ -705,7 +710,15 @@ if __name__ == '__main__':
     ap.add_argument('eyes', nargs='?', default=None, help='JSON [[cx, cy, rx, ry], ...]')
     ap.add_argument('--photo', help='photo pinned beside the canvas (default: the subject)')
     ap.add_argument('--style', choices=['v1', 'v2'], default='v1')
+    ap.add_argument('--crop-top', type=float, default=.35, help='canvas window position in a taller picture (0 top, 1 bottom)')
+    ap.add_argument('--face', help='JSON [cx, cy, rx, ry] of the face (v2 texture pass leaves it alone)')
+    ap.add_argument('--figure', help='JSON [cx, cy, rx, ry] of the whole figure (v2 softens the background outside it)')
     a = ap.parse_args()
+    CROP_TOP = a.crop_top
+    if a.face:
+        REGIONS['face'] = tuple(json.loads(a.face))
+    if a.figure:
+        REGIONS['figure'] = tuple(json.loads(a.figure))
     plan(a.subject, None if a.sketch == '-' else a.sketch, a.out, json.loads(a.focus),
          None if a.signature == '-' else json.loads(a.signature), json.loads(a.eyes) if a.eyes else None,
          photo_path=a.photo, layers=LAYERS_V2 if a.style == 'v2' else LAYERS_V1)

@@ -64,6 +64,20 @@ v2 分两步：
 $PY paint.py plan TARGET.png src/sketch.png OUT "$FOCUS" '["Leo 2026", [880, 1318, 230, 70]]' "$EYES" --photo src/subject.png --style v2
 ```
 
+## 换一张照片
+
+每张照片要准备：
+1. 裁成 2:3，作为 1024×1536 的 `subject.png`。
+2. 生成两张图，都要附上照片作参考：一张对齐的起稿线稿，一张目标油画。提示词照 `prompts/` 改，把这张照片里的特征写进去（衣服花纹、眼镜、手等）。
+3. 看图标出焦点区域、眼睛、脸和整个人物的椭圆。
+
+人物在画面上方时加 `--crop-top 0`，让画布的 4:5 窗口从顶部开始取。签名放在画面空白处，不要压在人物上。
+
+```bash
+$PY paint.py plan target.png sketch.png OUT "$FOCUS" '["Leo 2026", [870, 60, 230, 70]]' "$EYES" \
+    --photo subject.png --style v2 --crop-top 0 --face '[0.53,0.24,0.17,0.16]' --figure '[0.52,0.6,0.46,0.6]'
+```
+
 ## 局限
 
 - 焦点和眼睛的位置是人工标的。
