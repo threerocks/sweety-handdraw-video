@@ -391,6 +391,9 @@ def pass_row(labels, current):
 # ------------------------------------------------------------------------------------------------ build
 def build(plan, palette):
     passes = plan['passes']
+    pace = plan.get('pace', {})                      # v4: shorter feature caps; only the last stretch of eye work at life pace
+    feature_cap = pace.get('feature_cap', FEATURE_CAP)
+    eye_life = pace.get('eye_life', {})
     tip = np.array([FW + 200., FH + 300.])
     timeline = []
     for pi, ps in enumerate(passes):
@@ -417,12 +420,22 @@ def build(plan, palette):
             evs.append(dict(kind='travel', pi=pi, b=fp[0].copy(), real=0., slow=slow))
             evs.append(dict(kind='stroke', pi=pi, st=st, path=fp, s=s, L=float(s[-1]), real=stroke_seconds(st, s[-1]) + .08 * bool(slow),
                             rgb=st["rgb"], slow=slow, focal=bool(slow)))
+        if ps['name'] in eye_life:      # the eye strokes before the last eye_life seconds join the other features
+            acc = 0.
+            for i in range(len(evs) - 1, -1, -1):
+                e = evs[i]
+                if e['kind'] == 'stroke' and e['slow'] == FOCAL_LAPSE and e['st']['mix'] < 900:
+                    acc += e['real'] + .25
+                    if acc > eye_life[ps['name']]:
+                        e['slow'] = FEATURE_LAPSE
+                        if i and evs[i - 1]['kind'] == 'travel':
+                            evs[i - 1]['slow'] = FEATURE_LAPSE
         for base in (FEATURE_LAPSE, EARLY_LAPSE):
             others = [e for e in evs if e.get('slow') == base]
             need = sum(stroke_seconds(e['st'], e['L']) + .25 for e in others if e['kind'] == 'stroke') / base
-            if need > FEATURE_CAP:
+            if need > feature_cap:
                 for e in others:
-                    e['slow'] = base * need / FEATURE_CAP
+                    e['slow'] = base * need / feature_cap
         timeline.append(evs)
 
     def settle(evs, tip, decide):
@@ -464,9 +477,10 @@ def build(plan, palette):
         name = passes[pi]['name']
         settle(evs, tip, None)
         focal = lambda: sum(e['real'] / e['slow'] for e in evs if e.get('slow'))   # life-pace time comes on top of the budget
-        lap = fit(evs, BUDGET.get(name, 5.) + focal())
+        budget = passes[pi].get('budget', BUDGET.get(name, 5.))       # v4 plans carry each pass's video seconds
+        lap = fit(evs, budget + focal())
         settle(evs, tip, lap)
-        lap = fit(evs, BUDGET.get(name, 5.) + focal())
+        lap = fit(evs, budget + focal())
         tip = settle(evs, tip, None)
         for e, l, v in zip(evs, lap, video_time(evs, lap)):
             e['video'] = v
@@ -562,7 +576,7 @@ def main():
     ff = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{FW}x{FH}', '-r', str(FPS),
                            '-i', '-', '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-pix_fmt', 'yuv420p',
                            '-movflags', '+faststart', str(out_path)], stdin=subprocess.PIPE)
-    canvas = np.tile(paint.CANVAS_RGB, (H, W, 1))
+    canvas = np.tile(np.array(plan.get('ground', paint.CANVAS_RGB)), (H, W, 1))    # v4: a toned canvas, no wash pass
     height = np.zeros((H, W))
     thick = np.zeros((H, W))
     patches = {}

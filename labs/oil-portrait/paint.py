@@ -122,6 +122,7 @@ MEDIA = {
     'oil_fine': dict(opacity=.97, load_len=22., dry=.6, pickup=.14, colvar=.012, impasto=.9, cap=.8, lanes=.7),
     'oil_detail': dict(opacity=.97, load_len=30., dry=.1, pickup=.2, colvar=.004, impasto=.3, cap=.8, lanes=.25),   # soft round
     'oil_skin': dict(opacity=.95, load_len=26., dry=.15, pickup=.38, colvar=.005, impasto=.25, cap=.9, lanes=.3),
+    'flat':     dict(opacity=.97, load_len=34., dry=.45, pickup=.18, colvar=.012, impasto=.75, cap=.35, lanes=.75, square=True),  # v4 planes
     'scumble':  dict(opacity=.85, load_len=5., dry=1.5, pickup=.08, colvar=.02, impasto=.12, cap=.7, lanes=.9),   # dry brush
     'blend':    dict(opacity=.6, load_len=1e9, dry=0., pickup=1., colvar=0., impasto=.08, cap=.9, lanes=.25),
     'sign':     dict(opacity=.95, load_len=1e9, dry=.3, pickup=.05, colvar=0., impasto=.8, cap=.7, lanes=.3),
@@ -204,7 +205,10 @@ def render(stroke, canvas, height, thick, tooth, apply=True):
     ss = s[idx] + np.where(((idx == 0) & (lon < 0)) | ((idx == n - 1) & (lon > 0)), lon, 0.)
     wpx = w[idx]
     over = np.where(ss < 0, -ss, np.where(ss > L, ss - L, 0.))
-    rr = np.sqrt((lat / wpx) ** 2 + (over / (wpx * m['cap'])) ** 2)
+    if m.get('square'):                              # a flat brush: square ends, the corners only slightly worn
+        rr = np.maximum(np.abs(lat) / wpx, over / (wpx * m['cap'])) * .85 + np.sqrt((lat / wpx) ** 2 + (over / (wpx * m['cap'])) ** 2) * .15
+    else:
+        rr = np.sqrt((lat / wpx) ** 2 + (over / (wpx * m['cap'])) ** 2)
     soft = stroke.get('soft', 0.)                    # edge hierarchy: a stroke where the form turns has a soft edge
     edge = np.clip((1 - rr) * wpx / (1.1 + soft * .6 * wpx) + .5, 0, 1)
     inside = edge > 0
@@ -350,6 +354,8 @@ def plan_layer(spec, ref_rgb, canvas, focus, rng, start_tip):
             for e in FEATURES:
                 inside &= ~ellipse_mask(e, 1.1)
         thresh = np.where(inside, thresh, 1e9)
+    if spec.get('area'):           # v4: a pass for one area mask (hair, face, the features)
+        thresh = np.where(AREAS[spec['area']], thresh, 1e9)
     step = max(2, int(round(spec.get('grid', 1.) * R)))
     cands = []
     for gy in range(0, H, step):
@@ -467,6 +473,8 @@ def painter_order(strokes, mix_l, start_tip, rng):
                 st = pool.pop(j)
                 if d1[j] < d0[j]:
                     st['points'] = st['points'][::-1]
+                    if st.get('press_fixed'):     # v4 planes: the lifted end stays where the plane meets its neighbour
+                        st['press'] = tuple(st['press'][::-1])
                 ordered.append(st)
                 tip = np.array(st['points'][-1])
     return ordered
@@ -698,6 +706,7 @@ LAYERS = LAYERS_V1
 # Ellipses [cx, cy, rx, ry] (canvas fractions) of the face and of the whole figure (head, hair, body): the hair/clothes
 # texture pass works on the figure outside the face, the large softening brush on everything outside the figure.
 REGIONS = {'face': (0.41, 0.37, 0.15, 0.16), 'figure': (0.42, 0.55, 0.40, 0.50)}
+AREAS = {}         # v4 area masks (bg, skin, hair, clothes, face, features), set by planes.area_masks()
 FEATURES = []      # focal ellipses [cx, cy, rx, ry]: eyes, mouth, nose, lenses (focus weight >= .95), set by plan()
 EYE_FEATURES = set()   # indices of the features that hold an eye
 LINE_FEATURES = []     # crisp-edged features (focus weight 1.0: eyes, lips, glasses) that get the 勾勒 lines; a soft feature
@@ -899,10 +908,11 @@ if __name__ == '__main__':
     ap.add_argument('signature', nargs='?', default='-', help='JSON ["text", [x, y, w, h]] or -')
     ap.add_argument('eyes', nargs='?', default=None, help='JSON [[cx, cy, rx, ry], ...]')
     ap.add_argument('--photo', help='photo pinned beside the canvas (default: the subject)')
-    ap.add_argument('--style', choices=['v1', 'v2'], default='v1')
+    ap.add_argument('--style', choices=['v1', 'v2', 'v4'], default='v1')
     ap.add_argument('--crop-top', type=float, default=.35, help='canvas window position in a taller picture (0 top, 1 bottom)')
     ap.add_argument('--face', help='JSON [cx, cy, rx, ry] of the face (v2 texture pass leaves it alone)')
     ap.add_argument('--texture', help='JSON [cx, cy, rx, ry] of skin that keeps a fine texture, e.g. stubble (v2 干擦 pass)')
+    ap.add_argument('--areas', help='v4: area map registered to the photo (flat skin/hair/clothes/background colours)')
     ap.add_argument('--figure', help='JSON [cx, cy, rx, ry] of the whole figure (v2 softens the background outside it)')
     a = ap.parse_args()
     CROP_TOP = a.crop_top
@@ -912,6 +922,16 @@ if __name__ == '__main__':
         REGIONS['figure'] = tuple(json.loads(a.figure))
     if a.texture:
         REGIONS['texture'] = tuple(json.loads(a.texture))
-    plan(a.subject, None if a.sketch == '-' else a.sketch, a.out, json.loads(a.focus),
-         None if a.signature == '-' else json.loads(a.signature), json.loads(a.eyes) if a.eyes else None,
-         photo_path=a.photo, layers=LAYERS_V2 if a.style == 'v2' else LAYERS_V1)
+    if a.style == 'v4':
+        import paint as engine          # planes.py imports this file as the module 'paint': hand it the settings
+        import planes
+        engine.REGIONS.update(REGIONS)
+        engine.CROP_TOP = CROP_TOP
+        planes.AREA_MAP = a.areas
+        planes.plan_v4(a.subject, None if a.sketch == '-' else a.sketch, a.out, json.loads(a.focus),
+                       None if a.signature == '-' else json.loads(a.signature), json.loads(a.eyes) if a.eyes else None,
+                       photo_path=a.photo)
+    else:
+        plan(a.subject, None if a.sketch == '-' else a.sketch, a.out, json.loads(a.focus),
+             None if a.signature == '-' else json.loads(a.signature), json.loads(a.eyes) if a.eyes else None,
+             photo_path=a.photo, layers=LAYERS_V2 if a.style == 'v2' else LAYERS_V1)
