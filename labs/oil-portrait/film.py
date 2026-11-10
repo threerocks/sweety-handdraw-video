@@ -187,54 +187,65 @@ class Palette:
 
 # ------------------------------------------------------------------------------------------------ hand
 def extend_arm(img, extra):
-    """Continue the sleeve below the asset's bottom edge along the forearm's lean: the bottom rows' cross-section,
-    widening slowly toward the upper arm, with soft diagonal folds (a repeated texture read as a stocking)."""
+    """Continue the sleeve below the asset's bottom edge along the forearm's lean, widening slowly toward the upper arm.
+    The cloth is the sleeve's own: the rows above the edge, mirrored back and forth, each stretched onto the outline the
+    bottom rows continue (a repeated cross-section read as a stocking, and on sheer gauze as plaid)."""
     a = np.asarray(img).astype(float)
     h, w = a.shape[:2]
     alpha = a[..., 3] > 128
     rows = [h - 1 - k for k in (0, 60, 120)]
     cx = [np.flatnonzero(alpha[r]).mean() for r in rows]
     slope = (cx[0] - cx[2]) / 120.
-    profile = a[h - 8:h].mean(0)                          # (w, 4) cross-section of the sleeve
-    xs = np.flatnonzero(profile[:, 3] > 128)
-    centre = xs.mean()
+    xs = np.flatnonzero(a[h - 8:h, :, 3].mean(0) > 128)
+    centre, half = (xs.min() + xs.max()) / 2, (xs.max() - xs.min()) / 2
     grow = int(.2 * (xs.max() - xs.min())) + 2
+    extent = []                                           # the sleeve's span in each row above the edge
+    for r in range(h - 1, -1, -1):
+        on = np.flatnonzero(a[r, :, 3] > 60)
+        if len(on) < .6 * (xs.max() - xs.min()):
+            break
+        extent.append((on.min(), on.max()))
+    n = max(1, min(len(extent), 360))
     out = np.zeros((h + extra, w + int(abs(slope) * extra) + grow + 40, 4))
     out[:h, :w] = a
-    rng = np.random.default_rng(5)
-    phase = rng.uniform(0, 6.3, 3)
     X = np.arange(out.shape[1], dtype=float)
+    cols = np.arange(w)
     for k in range(extra):
         f = 1 + .2 * k / extra
         c = centre + slope * (k + 1)
-        src = centre + (X - c) / f
-        row = np.stack([np.interp(src, np.arange(w), profile[:, ch], left=0, right=0) for ch in range(4)], -1)
-        u = (X - c) / max(1., (xs.max() - xs.min()) * f / 2)
-        fold = 1 + .045 * np.sin(k / 37. + u * 1.6 + phase[0]) + .03 * np.sin(k / 13. - u * 2.4 + phase[1])
-        row[:, :3] *= fold[:, None]
-        out[h + k] = row
+        m = k % (2 * n)
+        back = m if m < n else 2 * n - 1 - m              # ping-pong: up n rows, then down again
+        lo, hi = extent[back] if extent else (xs.min(), xs.max())
+        rel = (X - (c - half * f)) / (2 * half * f)
+        src = lo + rel * (hi - lo)
+        out[h + k] = np.stack([np.interp(src, cols, a[h - 1 - back, :, ch], left=0, right=0) for ch in range(4)], -1)
     return Image.fromarray(out.clip(0, 255).astype(np.uint8))
 
 
 class Hand:
-    def __init__(self):
-        src = Image.open(HAND).convert('RGBA')
+    def __init__(self, path=HAND):
+        """path: a transparent hand asset; a sidecar <name>.json may give its own nib (asset pixels) and scale."""
+        path = Path(path)
+        side = path.with_suffix('.json')
+        meta = json.loads(side.read_text()) if side.exists() else {}
+        nib, scale = meta.get('nib', NIB), meta.get('scale', HAND_SCALE)
+        src = Image.open(path).convert('RGBA')
         w, h = src.size
-        src = src.resize((round(w * HAND_SCALE), round(h * HAND_SCALE)), Image.LANCZOS)
+        src = src.resize((round(w * scale), round(h * scale)), Image.LANCZOS)
         src = extend_arm(src, 900)
         pad = 160
         canvas = Image.new('RGBA', (src.width + 2 * pad, src.height + 2 * pad), (0, 0, 0, 0))
         canvas.paste(src, (pad, pad))
         self.pil = canvas
         img = np.asarray(canvas, float)
-        self.nib = np.array(NIB) * HAND_SCALE + pad
+        self.nib = np.array(nib) * scale + pad
         rgb, a = img[..., :3], img[..., 3]
         # bristles: light warm-neutral pixels near the tip, before the ferrule; paint loads their outer two thirds
         yy, xx = np.mgrid[0:a.shape[0], 0:a.shape[1]]
         dist = np.hypot(xx - self.nib[0], yy - self.nib[1])
         lum = rgb @ [.299, .587, .114]
         sat = rgb.max(-1) - rgb.min(-1)
-        cream = (a > 40) & (lum > 150) & (sat < 70) & (rgb[..., 0] >= rgb[..., 2]) & (dist < 62 * HAND_SCALE / .7)
+        cream = (a > 40) & (lum > 150) & (sat < 70) & (rgb[..., 0] >= rgb[..., 2]) & (dist < 62 * scale / .7)
         length = dist[cream].max() if cream.any() else 1.
         self.tint = np.where(cream, np.clip(1.15 - dist / (length * .8), 0, 1) ** .8, 0.)
         from scipy import ndimage
@@ -490,6 +501,7 @@ def main():
     ap.add_argument('--until', type=float, default=None)
     ap.add_argument('--intro', type=float, default=1.2)
     ap.add_argument('--outro', type=float, default=3.5)
+    ap.add_argument('--hand', default=str(HAND), help='transparent hand asset (optional sidecar .json: nib, scale)')
     args = ap.parse_args()
     d = Path(args.plan_dir)
     plan = json.loads((d / 'plan.json').read_text())
@@ -497,7 +509,7 @@ def main():
     reference = np.asarray(Image.open(d / 'reference.png').convert('RGB'))
     rng = np.random.default_rng(3)
     palette = Palette(rng)
-    hand = Hand()
+    hand = Hand(args.hand)
     labels = list(dict.fromkeys(p['label'] for p in plan['passes']))     # passes sharing a name share one label
     label_of = [labels.index(p['label']) for p in plan['passes']] + [len(labels)]
     rows = [pass_row(labels, k) for k in range(len(labels) + 1)]
