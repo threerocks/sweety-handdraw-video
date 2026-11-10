@@ -122,6 +122,7 @@ MEDIA = {
     'oil_fine': dict(opacity=.97, load_len=22., dry=.6, pickup=.14, colvar=.012, impasto=.9, cap=.8, lanes=.7),
     'oil_detail': dict(opacity=.97, load_len=30., dry=.1, pickup=.2, colvar=.004, impasto=.3, cap=.8, lanes=.25),   # soft round
     'oil_skin': dict(opacity=.95, load_len=26., dry=.15, pickup=.38, colvar=.005, impasto=.25, cap=.9, lanes=.3),
+    'scumble':  dict(opacity=.85, load_len=5., dry=1.5, pickup=.08, colvar=.02, impasto=.12, cap=.7, lanes=.9),   # dry brush
     'blend':    dict(opacity=.6, load_len=1e9, dry=0., pickup=1., colvar=0., impasto=.08, cap=.9, lanes=.25),
     'sign':     dict(opacity=.95, load_len=1e9, dry=.3, pickup=.05, colvar=0., impasto=.8, cap=.7, lanes=.3),
 }
@@ -329,6 +330,8 @@ def plan_layer(spec, ref_rgb, canvas, focus, rng, start_tip):
     gmag = np.hypot(ndimage.sobel(lum_g, 1), ndimage.sobel(lum_g, 0))
     g_ref = np.percentile(gmag, 90) + 1e-6
     diff = np.linalg.norm(ref_lab - canvas_lab, axis=-1)
+    if spec.get('darken'):         # stubble and the like are darker than the skin around them: only darker paint goes on
+        diff = np.where(ref_lab[..., 0] < canvas_lab[..., 0] - 2, diff, 0.)
     thresh = spec['T'] / np.clip(focus, .05, 1) ** spec['gamma']
     skin = skin_mask(ref_rgb) if spec.get('skin') else None
     if skin is not None:           # the face converges further on the model than the rest
@@ -343,6 +346,9 @@ def plan_layer(spec, ref_rgb, canvas, focus, rng, start_tip):
         inside = focus_map([list(REGIONS[spec['only']]) + [1.]], 0) > .9
         for name in spec.get('exclude', []):
             inside &= ~(focus_map([list(REGIONS[name]) + [1.]], 0) > .9)
+        if spec.get('skip_features'):
+            for e in FEATURES:
+                inside &= ~ellipse_mask(e, 1.1)
         thresh = np.where(inside, thresh, 1e9)
     step = max(2, int(round(spec.get('grid', 1.) * R)))
     cands = []
@@ -680,6 +686,10 @@ LAYERS_V2 = [
          blur=.4, soft=.3, focal=True, skin=True, skin_T=.7, feat_T=.6, **{'break': 12}),
     dict(name='polish', label='细节', R=2.8, T=5, maxlen=7, minlen=2, fc=.6, mixes=18, gamma=3.2, medium='oil_fine', own=.85,
          blur=.4, soft=.2, focal=True, skin=True, skin_T=.7, feat_T=.6, feather_after=True, **{'break': 10}),
+    # 干擦: where the skin keeps a fine texture (stubble, freckles; marked by hand with --texture), short dabs of a nearly
+    # dry brush in the target's own fine colour catch only the tops of the canvas weave, over the softened skin
+    dict(name='scumble', label='干擦', R=2.4, T=4, maxlen=3, minlen=1, fc=.5, mixes=6, gamma=0., medium='scumble', own=.95,
+         blur=.2, dabs=True, press=(.5, .3), cover=1.0, only='texture', skip_features=True, darken=True, **{'break': 8}),
     # the last small accents; then the crisp lines (勾勒) and the pupils and catchlights (点睛) go on top of everything
     dict(name='accent', label='细节', R=2.0, T=9, maxlen=4, minlen=1, fc=.5, mixes=6, gamma=5., medium='oil_fine', own=.92,
          blur=.3, dabs=True, press=(.6, .4), focal=True, lines_after=True, touches_after=True, **{'break': 10}),
@@ -811,6 +821,8 @@ def plan(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes=No
         run('sketch', '起稿', sketch)
     tip = (W * .2, H * .1)
     for spec in layers:
+        if spec.get('only') and spec['only'] not in REGIONS:    # e.g. no --texture region: no 干擦 pass
+            continue
         strokes = plan_layer(spec, ref, canvas, focus, rng, tip)
         if spec['name'] == 'accent' and eyes and not spec.get('touches_after'):     # v1: touches inside the accent pass
             touches = eye_touches(ref, eyes, rng)
@@ -890,6 +902,7 @@ if __name__ == '__main__':
     ap.add_argument('--style', choices=['v1', 'v2'], default='v1')
     ap.add_argument('--crop-top', type=float, default=.35, help='canvas window position in a taller picture (0 top, 1 bottom)')
     ap.add_argument('--face', help='JSON [cx, cy, rx, ry] of the face (v2 texture pass leaves it alone)')
+    ap.add_argument('--texture', help='JSON [cx, cy, rx, ry] of skin that keeps a fine texture, e.g. stubble (v2 干擦 pass)')
     ap.add_argument('--figure', help='JSON [cx, cy, rx, ry] of the whole figure (v2 softens the background outside it)')
     a = ap.parse_args()
     CROP_TOP = a.crop_top
@@ -897,6 +910,8 @@ if __name__ == '__main__':
         REGIONS['face'] = tuple(json.loads(a.face))
     if a.figure:
         REGIONS['figure'] = tuple(json.loads(a.figure))
+    if a.texture:
+        REGIONS['texture'] = tuple(json.loads(a.texture))
     plan(a.subject, None if a.sketch == '-' else a.sketch, a.out, json.loads(a.focus),
          None if a.signature == '-' else json.loads(a.signature), json.loads(a.eyes) if a.eyes else None,
          photo_path=a.photo, layers=LAYERS_V2 if a.style == 'v2' else LAYERS_V1)

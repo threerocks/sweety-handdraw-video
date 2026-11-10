@@ -41,7 +41,7 @@ INK = (43, 38, 34)
 
 BUDGET = {'wash': 4.6, 'sketch': 8.5, 'block': 11.5, 'form': 10.0, 'refine': 6.5, 'detail': 5.5, 'accent': 7.0, 'sign': 3.0}
 BUDGET_V2 = {'wash': 3.5, 'sketch': 7.0, 'block': 8.0, 'form': 7.5, 'blend': 3.0, 'refine': 5.5, 'texture': 6.5, 'detail': 4.5,
-             'polish': 4.0, 'feather': 3.0, 'lines': 0., 'accent': 5.5, 'dianjing': 0., 'sign': 3.0}
+             'polish': 4.0, 'scumble': 3.0, 'feather': 3.0, 'lines': 0., 'accent': 5.5, 'dianjing': 0., 'sign': 3.0}
 ZOOM = 2.0              # camera push-in on the face while the features are painted
 HEADER, HEADER_FADE = 140, 24   # rows of title and pass labels kept fixed in a close-up, and their soft lower edge
 LABELS_BOTTOM = 142     # last frame row of the pass labels
