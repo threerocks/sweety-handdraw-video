@@ -36,7 +36,7 @@ def area_masks(ref, rng):
     """Background, skin, hair and clothes: from an area map when there is one, else from the target's colours and the
     face/figure ellipses (enough for a plain background and dark hair; a warm patterned dress or auburn hair fools it)."""
     if AREA_MAP:
-        return area_masks_from_map(AREA_MAP)
+        return area_masks_from_map(AREA_MAP, ref, rng)
     lab = rgb2lab(ndimage.gaussian_filter(ref, (3, 3, 0)))
     face = ellipse_mask(REGIONS['face'])
     fx, fy, frx, fry = REGIONS['face']
@@ -72,20 +72,56 @@ def area_masks(ref, rng):
     for e in FEATURES:
         feats |= ellipse_mask(e, 1.3)
     AREAS.update(bg=bg, skin=skin, hair=hair, clothes=clothes, person=person, features=feats,
-                 bg_edge=bg & ndimage.binary_dilation(person, iterations=22),
+                 outline=outline_band(person),
                  face=(face | (skin & ellipse_mask(REGIONS['face'], 1.25))) & person)
     return AREAS
 
 
-def area_masks_from_map(path):
+def outline_band(person, r=9):
+    """Both sides of the figure's outline: where 收边 works the figure and the background into each other."""
+    return ndimage.binary_dilation(person, iterations=r) & ndimage.binary_dilation(~person, iterations=r)
+
+
+def snap_areas(masks, ref, rng, band=16):
+    """The area map is drawn separately from the target and can sit a few pixels off (an ear or a sideburn labelled
+    background). Along every boundary, give each pixel to the nearby area whose colours (in the target) it matches."""
+    names = list(masks)
+    lab = rgb2lab(ndimage.gaussian_filter(ref, (1.5, 1.5, 0)))
+    lbl = np.zeros((H, W), int)
+    for k, n in enumerate(names):
+        lbl[masks[n]] = k
+    edge = np.zeros((H, W), bool)
+    for n in names:
+        edge |= masks[n] ^ ndimage.binary_erosion(masks[n], iterations=1)
+    near = ndimage.binary_dilation(edge, iterations=band)
+    costs = []
+    for n in names:
+        core = ndimage.binary_erosion(masks[n], iterations=6) & ~near
+        if core.sum() < 200:
+            core = masks[n]
+        pts = lab[core]
+        centres, _ = kmeans(pts[rng.choice(len(pts), min(len(pts), 20000), replace=False)], 6, rng)
+        d = np.min([np.linalg.norm(lab - c, axis=-1) for c in centres], 0)
+        d = d + np.where(ndimage.binary_dilation(masks[n], iterations=band), 0., 1e3)   # only areas that are close by
+        costs.append(d)
+    best = np.argmin(np.stack(costs), 0)
+    lbl = np.where(near, best, lbl)
+    votes = np.stack([ndimage.uniform_filter((lbl == k).astype(np.float32), 5) for k in range(len(names))])
+    lbl = votes.argmax(0)
+    return {n: lbl == k for k, n in enumerate(names)}
+
+
+def area_masks_from_map(path, ref=None, rng=None):
     m = load_subject(path)[0] * 255
     names = list(AREA_COLOURS)
-    ref = np.array([AREA_COLOURS[n] for n in names], float)
-    lbl = np.argmin(((m[..., None, :] - ref[None, None]) ** 2).sum(-1), -1)
+    table = np.array([AREA_COLOURS[n] for n in names], float)
+    lbl = np.argmin(((m[..., None, :] - table[None, None]) ** 2).sum(-1), -1)
     size = 7                                              # majority filter: clean edges, no stray pixels
     votes = np.stack([ndimage.uniform_filter((lbl == k).astype(np.float32), size) for k in range(len(names))])
     lbl = votes.argmax(0)
     masks = {n: lbl == k for k, n in enumerate(names)}
+    if ref is not None:
+        masks = snap_areas(masks, ref, rng)
     person = ~masks['bg']
     face = ellipse_mask(REGIONS['face'])
     feats = np.zeros((H, W), bool)
@@ -93,15 +129,17 @@ def area_masks_from_map(path):
         feats |= ellipse_mask(e, 1.3)
     masks['skin'] |= face & person & ~masks['hair']
     masks['clothes'] &= ~masks['skin']
-    AREAS.update(masks, person=person, features=feats, bg_edge=masks['bg'] & ndimage.binary_dilation(person, iterations=22),
+    AREAS.update(masks, person=person, features=feats, outline=outline_band(person),
                  face=(face | (masks['skin'] & ellipse_mask(REGIONS['face'], 1.25))) & person)
     return AREAS
 
 
-def plane_strokes(ref, canvas, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0., medium='flat', spacing=1.45):
+def plane_strokes(ref, canvas, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0., medium='flat', spacing=1.45, max_len=None,
+                  axis=False):
     """Flat planes: the target's colours inside mask quantised to k mixes, each connected plane filled with parallel
     straight strokes along its long axis, each stroke in the target's colour under it. T skips strokes where the canvas
-    is already within T (ΔE) of the target (a finer pass only corrects)."""
+    is already within T (ΔE) of the target (a finer pass only corrects). max_len (in brush widths) cuts long runs into
+    short strokes (tiles, knife strokes); axis lays strokes only horizontally or vertically (a block mosaic)."""
     lab = rgb2lab(ndimage.gaussian_filter(ref, (R * .3, R * .3, 0)))
     can = rgb2lab(canvas)
     if mask.sum() < 50:
@@ -143,7 +181,9 @@ def plane_strokes(ref, canvas, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0.,
             else:                                          # no clear direction: along the plane's long axis
                 evals, evecs = np.linalg.eigh(np.cov((P - cen).T) + np.eye(2) * 1e-6)
                 u = evecs[:, -1]
-            tilt = rng.normal(0, .12)                      # a hand never lays planes exactly on the axis
+            if axis:
+                u = np.array([1., 0.]) if abs(u[0]) >= abs(u[1]) else np.array([0., 1.])
+            tilt = rng.normal(0, .04 if axis else .12)     # a hand never lays planes exactly on the axis
             u = np.array([u[0] * np.cos(tilt) - u[1] * np.sin(tilt), u[0] * np.sin(tilt) + u[1] * np.cos(tilt)])
             v = np.array([-u[1], u[0]])
             pu, pv = (P - cen) @ u, (P - cen) @ v
@@ -171,20 +211,30 @@ def plane_strokes(ref, canvas, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0.,
                             else:
                                 u1 = edge
                             press[e] = .3
-                    sel = band & (pu >= run[0]) & (pu <= run[-1])
-                    yy, xx = ys[sel], xs[sel]
-                    if T and np.linalg.norm(lab[yy, xx] - can[yy, xx], axis=1).mean() < T:
-                        continue
-                    colour = lab2rgb(np.median(lab[yy, xx], 0))
-                    m = max(2, int((u1 - u0) / (2 * Rp)) + 1)
-                    tt = np.linspace(u0, u1, m)
-                    jit = rng.normal(0, .06 * Rp, m)
-                    line = [cen + u * t + v * (o + j) for t, j in zip(tt, jit)]
-                    strokes.append(dict(points=[(float(a), float(b)) for a, b in line], R=float(Rp * rng.uniform(.9, 1.08)),
-                                        rgb=[float(x) for x in colour], mix=int(c),
-                                        mix_rgb=[float(x) for x in lab2rgb(centres[c] / wv)], medium=medium,
-                                        seed=int(rng.integers(1 << 30)), load=float(rng.uniform(.95, 1.15)), press=tuple(press),
-                                        press_fixed=True, soft=soft, pvar=.03, wobble=0))
+                    pieces = [(u0, u1, press[0], press[1])]
+                    if max_len and u1 - u0 > max_len * Rp:      # short strokes: tiles, knife strokes
+                        n = int(np.ceil((u1 - u0) / (max_len * Rp)))
+                        cut = np.linspace(u0, u1, n + 1)
+                        cut[1:-1] += rng.uniform(-.25, .25, n - 1) * Rp
+                        pieces = [(a, b + .15 * Rp * (i < n - 1), press[0] if i == 0 else .85, press[1] if i == n - 1 else .75)
+                                  for i, (a, b) in enumerate(zip(cut[:-1], cut[1:]))]
+                    for a0, a1, p0, p1 in pieces:
+                        sel = band & (pu >= a0) & (pu <= a1)
+                        if sel.sum() < 4:
+                            continue
+                        yy, xx = ys[sel], xs[sel]
+                        if T and np.linalg.norm(lab[yy, xx] - can[yy, xx], axis=1).mean() < T:
+                            continue
+                        colour = lab2rgb(np.median(lab[yy, xx], 0))
+                        m = max(2, int((a1 - a0) / (2 * Rp)) + 1)
+                        tt = np.linspace(a0, a1, m)
+                        jit = rng.normal(0, .06 * Rp, m)
+                        line = [cen + u * t + v * (o + j) for t, j in zip(tt, jit)]
+                        strokes.append(dict(points=[(float(a), float(b)) for a, b in line], R=float(Rp * rng.uniform(.9, 1.08)),
+                                            rgb=[float(x) for x in colour], mix=int(c),
+                                            mix_rgb=[float(x) for x in lab2rgb(centres[c] / wv)], medium=medium,
+                                            seed=int(rng.integers(1 << 30)), load=float(rng.uniform(.95, 1.15)), press=(p0, p1),
+                                            press_fixed=True, soft=soft, pvar=.03, wobble=0))
     return painter_order(strokes, centres[:, 0] / wv[0], start_tip, rng)
 
 
@@ -196,7 +246,7 @@ def v2_spec(name, **over):
 
 # area by area, as the painter in the reference video: (name, label, kind, args, video budget in seconds)
 STEPS_V4 = [
-    ('face', '脸部块面', 'planes', dict(area='skin', R=20, k=8), 11.),
+    ('face', '脸部块面', 'planes', dict(area='skin', R=26, k=7), 11.),
     ('face2', '脸部块面', 'planes', dict(area='skin', R=8, k=14, T=5), 6.),
     ('hair', '头发', 'planes', dict(area='hair', R=13, k=6), 5.),
     ('strands', '头发', 'layer', v2_spec('texture', only=None, exclude=[], area='hair', cover=1.2), 3.),
@@ -206,14 +256,28 @@ STEPS_V4 = [
     ('clothes3', '衣服', 'layer', v2_spec('detail', area='clothes', focal=False, skin=False, T=9, gamma=0.), 4.),
     ('background', '背景', 'planes', dict(area='bg', R=30, k=6), 6.),
     ('background2', '背景', 'planes', dict(area='bg', R=14, k=9, T=6), 3.),
-    # cutting in: round, curved background strokes along the silhouette, as a painter cleans the edge of the figure
-    ('cutin', '背景', 'layer', v2_spec('refine', area='bg_edge', focal=False, skin=False, gamma=0., T=5, R=7, medium='oil',
-                                      maxlen=8), 3.),
+    # 收边: the figure's outline in fine strokes of the target's own colours (no mixing toward a pile), straddling the
+    # edge: hair strands cross onto the background, background tucks under the hair, as in the target. A band of one
+    # colour along the edge (the earlier cut-in) read as a halo around a cut-out figure.
+    ('edges', '收边', 'layer', v2_spec('texture', only=None, exclude=[], area='outline', own=1., mixes=24, T=6, gamma=0.,
+                                      R=3.4, cover=1.1), 4.),
     ('face3', '深入', 'planes', dict(area='face', R=5, k=16, T=6), 3.),
     ('polish', '深入', 'layer', v2_spec('polish', area='features', skin=False, feather_after=False), 3.),
     ('scumble', '干擦', 'layer', v2_spec('scumble'), 2.),
     ('accent', '深入', 'layer', v2_spec('accent', area='features'), 2.),
 ]
+
+
+# styles (user's five sample paintings, described in words in the target prompts; prompts/target-<preset>.txt): how the
+# plane passes lay their strokes. R scales the brush; max_len cuts strokes short (in brush widths); axis = block mosaic
+PRESETS = {
+    'planes':  dict(),                                                         # 块面写生, the reference video
+    'blocky':  dict(medium='flat', R=.85, max_len=1.8, spacing=1.05, axis=True),   # 方块笔触
+    'knife':   dict(medium='knife', R=1.15, max_len=3.2, spacing=1.25),          # 刮刀厚涂
+    'sunlit':  dict(medium='oil', R=.9, soft=.25, spacing=1.3),                  # 外光写生
+    'digital': dict(medium='digital', R=1.05, soft=.35),                         # 数字厚涂
+}
+PRESET = 'planes'
 
 
 PACE_V4 = dict(feature_cap=5., eye_life={'polish': 7., 'lines': 6.})
@@ -264,6 +328,9 @@ def plan_v4(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
             continue
         if kind == 'planes':
             a = dict(args)
+            pre = dict(PRESETS[PRESET])
+            a['R'] = a['R'] * pre.pop('R', 1.)
+            a.update(pre)
             strokes = plane_strokes(ref, canvas, AREAS[a.pop('area')], rng=rng, start_tip=tip, **a)
         else:
             strokes = plan_layer(args, ref, canvas, focus, rng, tip)
@@ -292,5 +359,5 @@ def plan_v4(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
     Image.fromarray((canvas * 255).astype(np.uint8)).save(out / 'final-flat.png')
     Image.fromarray((shade(canvas, height, thick, tooth) * 255).astype(np.uint8)).save(out / 'final.png')
     (out / 'plan.json').write_text(json.dumps(dict(W=W, H=H, passes=passes, focus=focus_ellipses, face=list(REGIONS['face']),
-                                                   ground=GROUND.tolist(), style='v4', pace=PACE_V4), ensure_ascii=False))
+                                                   ground=GROUND.tolist(), style='v4', preset=PRESET, pace=PACE_V4), ensure_ascii=False))
     return passes

@@ -389,15 +389,20 @@ def pass_row(labels, current):
 
 
 # ------------------------------------------------------------------------------------------------ build
+PACE_SCALE = [1.]
+KEY_PASSES = {'sketch', 'face', 'hair', 'clothes', 'background'}   # what a short cut keeps most of (the reference video's beats)
+
+
 def build(plan, palette):
     passes = plan['passes']
     pace = plan.get('pace', {})                      # v4: shorter feature caps; only the last stretch of eye work at life pace
-    feature_cap = pace.get('feature_cap', FEATURE_CAP)
-    eye_life = pace.get('eye_life', {})
+    k = PACE_SCALE[0]                                # --length: every pass, cap and life-pace stretch shrinks alike
+    feature_cap = pace.get('feature_cap', FEATURE_CAP) * k
+    eye_life = {n: v * k for n, v in pace.get('eye_life', {}).items()}
     tip = np.array([FW + 200., FH + 300.])
     timeline = []
     for pi, ps in enumerate(passes):
-        evs = [dict(kind='pause', real=1.2 if pi else .6, pi=pi)]
+        evs = [dict(kind='pause', real=(1.2 if pi else .6) * min(1., k * 1.5), pi=pi)]
         last_key = None
         focal_trip = False
         for st in ps['strokes']:
@@ -451,7 +456,7 @@ def build(plan, palette):
                 if 'smear_pts' not in e:
                     e['smear_pts'] = palette.slot()
                 sp = np.array(e['smear_pts']) + [TRAY[0], TRAY[1]]
-                show = e['first'] or (not e['slow'] and lap is not None and lap[k] <= TRIP_LAPSE and shown < MAX_TRIPS)
+                show = e['first'] or (not e['slow'] and lap is not None and lap[k] <= TRIP_LAPSE and shown < max(1, round(MAX_TRIPS * min(1., PACE_SCALE[0] * 1.5))))
                 e['trip'] = bool(show) if decide is not None else e.get('trip', e['first'])
                 shown += e['trip']
                 if e['trip']:
@@ -478,6 +483,7 @@ def build(plan, palette):
         settle(evs, tip, None)
         focal = lambda: sum(e['real'] / e['slow'] for e in evs if e.get('slow'))   # life-pace time comes on top of the budget
         budget = passes[pi].get('budget', BUDGET.get(name, 5.))       # v4 plans carry each pass's video seconds
+        budget *= PACE_SCALE[0] ** (.5 if name in KEY_PASSES else 1.)   # a short cut keeps the big moves, trims the rest
         lap = fit(evs, budget + focal())
         settle(evs, tip, lap)
         lap = fit(evs, budget + focal())
@@ -515,6 +521,7 @@ def main():
     ap.add_argument('--until', type=float, default=None)
     ap.add_argument('--intro', type=float, default=1.2)
     ap.add_argument('--outro', type=float, default=3.5)
+    ap.add_argument('--length', type=float, default=None, help='fit the film to about this many seconds (a short cut)')
     ap.add_argument('--hand', default=str(HAND), help='transparent hand asset (optional sidecar .json: nib, scale)')
     args = ap.parse_args()
     d = Path(args.plan_dir)
@@ -534,6 +541,12 @@ def main():
     wm_layer = watermark_layer()
     wm_alpha = np.asarray(wm_layer)[..., 3:4] / 255.
     wm_rgb = np.asarray(wm_layer)[..., :3].astype(float)
+    if args.length:                  # a short cut: scale the pacing until the film fits
+        goal = args.length - (.5 + args.intro + 1.1 + args.outro)
+        for _ in range(5):
+            got = sum(e['video'] for e in build(plan, Palette(np.random.default_rng(3))))
+            PACE_SCALE[0] *= goal / got
+        print(f'pace scale {PACE_SCALE[0]:.2f}')
     events = build(plan, palette)
     # intro: the hand comes in from the lower right; outro: it leaves and the painting holds
     first_tip = next(e['b'] for e in events if e['kind'] == 'travel')

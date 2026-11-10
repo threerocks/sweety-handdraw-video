@@ -123,6 +123,9 @@ MEDIA = {
     'oil_detail': dict(opacity=.97, load_len=30., dry=.1, pickup=.2, colvar=.004, impasto=.3, cap=.8, lanes=.25),   # soft round
     'oil_skin': dict(opacity=.95, load_len=26., dry=.15, pickup=.38, colvar=.005, impasto=.25, cap=.9, lanes=.3),
     'flat':     dict(opacity=.97, load_len=34., dry=.45, pickup=.18, colvar=.012, impasto=.75, cap=.35, lanes=.75, square=True),  # v4 planes
+    'knife':    dict(opacity=.99, load_len=70., dry=.3, pickup=.3, colvar=.03, impasto=1.5, cap=.2, lanes=.12, square=True,
+                     ridge=1.4),   # palette knife: a flat sharp-edged plane, paint squeezed into ridges at its edges
+    'digital':  dict(opacity=.93, load_len=1e9, dry=0., pickup=.1, colvar=.006, impasto=.05, cap=.5, lanes=.12, square=True),
     'scumble':  dict(opacity=.85, load_len=5., dry=1.5, pickup=.08, colvar=.02, impasto=.12, cap=.7, lanes=.9),   # dry brush
     'blend':    dict(opacity=.6, load_len=1e9, dry=0., pickup=1., colvar=0., impasto=.08, cap=.9, lanes=.25),
     'sign':     dict(opacity=.95, load_len=1e9, dry=.3, pickup=.05, colvar=0., impasto=.8, cap=.7, lanes=.3),
@@ -250,7 +253,7 @@ def render(stroke, canvas, height, thick, tooth, apply=True):
     ridge = np.exp(-((np.abs(u) - .86) / .1) ** 2)
     pile = .45 * load * np.exp(-((ss - L) / (.45 * R)) ** 2)
     body = .3 + 1.0 * value                           # thick lights, thin darks
-    hgt = alpha * m['impasto'] * body * (.55 + .9 * (streak - .5) + .4 * (lanes - .86) / .14 * .3 + .25 * ridge + pile) * min(1., R / 12.) ** .5
+    hgt = alpha * m['impasto'] * body * (.55 + .9 * (streak - .5) + .4 * (lanes - .86) / .14 * .3 + m.get('ridge', .25) * ridge + pile) * min(1., R / 12.) ** .5
     patch = dict(box=(y0, y1, x0, x1), gy=gy.astype(np.int32), gx=gx.astype(np.int32), ss=ss.astype(np.float32), alpha=alpha.astype(np.float32),
                  paint=paint.astype(np.float32), hgt=hgt.astype(np.float32), L=float(L), wpx=wpx.astype(np.float32),
                  path=pts.astype(np.float32), s=s.astype(np.float32))
@@ -912,6 +915,7 @@ if __name__ == '__main__':
     ap.add_argument('--crop-top', type=float, default=.35, help='canvas window position in a taller picture (0 top, 1 bottom)')
     ap.add_argument('--face', help='JSON [cx, cy, rx, ry] of the face (v2 texture pass leaves it alone)')
     ap.add_argument('--texture', help='JSON [cx, cy, rx, ry] of skin that keeps a fine texture, e.g. stubble (v2 干擦 pass)')
+    ap.add_argument('--preset', default='planes', help='v4 style: planes | blocky | knife | sunlit | digital')
     ap.add_argument('--areas', help='v4: area map registered to the photo (flat skin/hair/clothes/background colours)')
     ap.add_argument('--figure', help='JSON [cx, cy, rx, ry] of the whole figure (v2 softens the background outside it)')
     a = ap.parse_args()
@@ -928,6 +932,7 @@ if __name__ == '__main__':
         engine.REGIONS.update(REGIONS)
         engine.CROP_TOP = CROP_TOP
         planes.AREA_MAP = a.areas
+        planes.PRESET = a.preset
         planes.plan_v4(a.subject, None if a.sketch == '-' else a.sketch, a.out, json.loads(a.focus),
                        None if a.signature == '-' else json.loads(a.signature), json.loads(a.eyes) if a.eyes else None,
                        photo_path=a.photo)
