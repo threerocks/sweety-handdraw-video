@@ -527,6 +527,8 @@ def main():
     d = Path(args.plan_dir)
     plan = json.loads((d / 'plan.json').read_text())
     tooth = np.load(d / 'tooth.npy').astype(float)
+    for f in d.glob('clip-*.png'):                                  # v4: the areas the block-in strokes are held inside
+        paint.CLIPS[f.stem[5:]] = np.asarray(Image.open(f), np.float32) / 255
     reference = np.asarray(Image.open(d / 'reference.png').convert('RGB'))
     rng = np.random.default_rng(3)
     palette = Palette(rng)

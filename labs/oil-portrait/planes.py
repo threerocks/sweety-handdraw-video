@@ -135,11 +135,12 @@ def area_masks_from_map(path, ref=None, rng=None):
 
 
 def plane_strokes(ref, canvas, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0., medium='flat', spacing=1.45, max_len=None,
-                  axis=False):
+                  axis=False, fill=False):
     """Flat planes: the target's colours inside mask quantised to k mixes, each connected plane filled with parallel
     straight strokes along its long axis, each stroke in the target's colour under it. T skips strokes where the canvas
     is already within T (ΔE) of the target (a finer pass only corrects). max_len (in brush widths) cuts long runs into
-    short strokes (tiles, knife strokes); axis lays strokes only horizontally or vertically (a block mosaic)."""
+    short strokes (tiles, knife strokes); axis lays strokes only horizontally or vertically (a block mosaic). fill covers
+    holes left bare inside an area: ends run past the hole at full pressure instead of lifting at its edge."""
     lab = rgb2lab(ndimage.gaussian_filter(ref, (R * .3, R * .3, 0)))
     can = rgb2lab(canvas)
     if mask.sum() < 50:
@@ -158,7 +159,19 @@ def plane_strokes(ref, canvas, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0.,
     votes = np.stack([ndimage.uniform_filter((lbl == c).astype(np.float32), size) for c in range(len(centres))])
     lbl = np.where(mask, votes.argmax(0), -1)
     strokes = []
-    min_area = (1.2 * R) ** 2
+    min_area = (.8 if fill else 1.2) * R * R * (1 if fill else 1.2)
+    # a sliver too small to be a plane (a thin band between two others) joins its nearest neighbour; skipped, it stays
+    # bare ground between the planes, which shows as light scratches on dark hair
+    small = np.zeros((H, W), bool)
+    for c in range(len(centres)):
+        comp, n = ndimage.label(lbl == c)
+        if n:
+            sizes = ndimage.sum_labels(np.ones((H, W)), comp, index=np.arange(1, n + 1))
+            small |= np.isin(comp, np.flatnonzero(sizes < min_area) + 1)
+    keep = mask & ~small
+    if small.any() and keep.any():
+        _, (iy, ix) = ndimage.distance_transform_edt(~keep, return_indices=True)
+        lbl = np.where(small, lbl[iy, ix], lbl)
     inside = ndimage.binary_dilation(mask, iterations=2)
     for c in range(len(centres)):
         comp, n = ndimage.label(lbl == c)
@@ -205,7 +218,7 @@ def plane_strokes(ref, canvas, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0.,
                     press = [.85, .7]
                     for e, (uu, edge) in enumerate(((u0, run[0]), (u1, run[-1]))):
                         q = np.rint(cen + u * uu + v * o).astype(int)
-                        if not (0 <= q[0] < W and 0 <= q[1] < H) or not inside[q[1], q[0]]:
+                        if not fill and (not (0 <= q[0] < W and 0 <= q[1] < H) or not inside[q[1], q[0]]):
                             if e == 0:
                                 u0 = edge
                             else:
@@ -236,6 +249,17 @@ def plane_strokes(ref, canvas, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0.,
                                             seed=int(rng.integers(1 << 30)), load=float(rng.uniform(.95, 1.15)), press=(p0, p1),
                                             press_fixed=True, soft=soft, pvar=.03, wobble=0))
     return painter_order(strokes, centres[:, 0] / wv[0], start_tip, rng)
+
+
+def bare_holes(deep, thick, min_px=10):
+    """Pixels inside an area where the ground still shows: never painted, or only grazed by a stroke's soft edge
+    (thick .6 is about three quarters cover). Thin strips count; specks under min_px are canvas tooth."""
+    holes = deep & (thick < .6)
+    comp, n = ndimage.label(holes, np.ones((3, 3)))
+    if not n:
+        return holes
+    sizes = ndimage.sum_labels(np.ones_like(thick), comp, index=np.arange(1, n + 1))
+    return np.isin(comp, np.flatnonzero(sizes >= min_px) + 1)
 
 
 def v2_spec(name, **over):
@@ -280,6 +304,7 @@ PRESETS = {
 PRESET = 'planes'
 
 
+CLIP_GROW, CLIP_FEATHER = 4., 4.   # a block-in stroke may reach this far (px) past its area, fading out over the feather
 PACE_V4 = dict(feature_cap=5., eye_life={'polish': 7., 'lines': 6.})
 
 
@@ -308,6 +333,13 @@ def plan_v4(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
     for name, colour in (('bg', (.85, .85, .85)), ('clothes', (.3, .4, .8)), ('hair', (.35, .2, .1)), ('skin', (.95, .7, .55))):
         vis[AREAS[name]] = colour
     Image.fromarray((vis * 255).astype(np.uint8)).save(out / 'areas.png')
+    # each block-in pass is held inside its own area, plus a few soft pixels: long straight strokes laid along a curved
+    # silhouette otherwise bow tens of pixels into the area painted before (background over the hair), more than the
+    # 收边 pass can win back, which leaves a dark contour, a light gap, then the hair
+    for name in {a['area'] for _, _, kind, a, _ in STEPS_V4 if kind == 'planes'}:
+        d = ndimage.distance_transform_edt(~AREAS[name])
+        paint.CLIPS[name] = np.clip(1 - (d - CLIP_GROW) / CLIP_FEATHER, 0, 1).astype(np.float32)
+        Image.fromarray((paint.CLIPS[name] * 255).astype(np.uint8)).save(out / f'clip-{name}.png')
     passes = []
     started = time.time()
 
@@ -331,7 +363,27 @@ def plan_v4(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
             pre = dict(PRESETS[PRESET])
             a['R'] = a['R'] * pre.pop('R', 1.)
             a.update(pre)
-            strokes = plane_strokes(ref, canvas, AREAS[a.pop('area')], rng=rng, start_tip=tip, **a)
+            area = a.pop('area')
+            strokes = plane_strokes(ref, canvas, AREAS[area], rng=rng, start_tip=tip, **a)
+            for st in strokes:
+                st['clip'] = area
+            if not a.get('T'):                             # a first block-in leaves no ground showing inside its area
+                tip = run(name, label, strokes, budget) or tip
+                deep = ndimage.binary_erosion(AREAS[area], iterations=6)   # the rim is the 收边 pass's work
+                for _ in range(2):
+                    holes = bare_holes(deep, thick)
+                    if holes.sum() <= 30:
+                        break
+                    fill = plane_strokes(ref, canvas, holes, R=max(4., a['R'] * .3), k=2, rng=rng, start_tip=tip,
+                                         medium=a.get('medium', 'flat'), spacing=1.1, soft=a.get('soft', 0.), fill=True)
+                    for st in fill:
+                        st['clip'] = area
+                        render(st, canvas, height, thick, tooth)
+                    passes[-1]['strokes'] += fill
+                    Image.fromarray((canvas * 255).astype(np.uint8)).save(out / f'pass-{len(passes):02d}-{name}.png')
+                    print(f'{"":10s} +{len(fill)} strokes fill {int(holes.sum())} bare px', flush=True)
+                    tip = fill[-1]['points'][-1] if fill else tip
+                continue
         else:
             strokes = plan_layer(args, ref, canvas, focus, rng, tip)
         tip = run(name, label, strokes, budget) or tip

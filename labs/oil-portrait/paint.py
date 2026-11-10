@@ -234,18 +234,27 @@ def render(stroke, canvas, height, thick, tooth, apply=True):
     dry = m['dry'] * (.35 + .65 * np.clip((value - .12) / .3, 0, 1))   # dark paint is laid rich: no ground specks in shadow
     alpha = np.clip((amount - .36 + .25 * (value < .3) + .55 * dry * (t - .5) * (1.2 - load)) * 3.4, 0, 1)
     alpha *= edge * m['opacity'] * stroke.get('opacity', 1.)
+    if stroke.get('clip'):                           # v4 block-in: a straight stroke along a curved silhouette stays in its area
+        alpha *= CLIPS[stroke['clip']][gy, gx]
     # colour: the mix, smeared with paint picked up along the way, with unmixed streaks
     colour = np.asarray(stroke['rgb'], float)
     under_idx = np.clip(np.rint(pts).astype(int), 0, [Wc - 1, Hc - 1])
     under = canvas[under_idx[:, 1], under_idx[:, 0]]
+    # only wet paint comes up on the brush: bare ground (v4 starts on a toned, dry canvas) gives nothing, or dark
+    # strokes laid straight onto the ground turn grey; a wash or any earlier stroke counts as wet
+    wet = np.clip(thick[under_idx[:, 1], under_idx[:, 0]] / .08, 0, 1) if thick is not None else np.ones(n)
     ema = np.empty_like(under)
-    acc = under[0].copy()
+    emw = np.empty(n)
+    acc, accw = under[0].copy(), float(wet[0])
     ds = np.r_[0, np.diff(s)]
     k = np.clip(ds / (3. * R), 0, 1)
     for i in range(n):
         acc += (under[i] - acc) * k[i]
+        accw += (wet[i] - accw) * k[i]
         ema[i] = acc
+        emw[i] = accw
     pick = m['pickup'] * (1 - np.exp(-np.clip(ss, 0, None) / (2. * R))) * (.6 + .4 * (1 - load))
+    pick = pick * emw[np.clip(idx[inside], 0, n - 1)]
     paint = (1 - pick)[:, None] * colour + pick[:, None] * ema[np.clip(idx[inside], 0, n - 1)]
     paint = paint + ((streak - .5) * 2 * m['colvar'])[:, None] * np.array([1., .96, .9])
     paint = np.clip(paint, 0, 1)
@@ -710,6 +719,7 @@ LAYERS = LAYERS_V1
 # texture pass works on the figure outside the face, the large softening brush on everything outside the figure.
 REGIONS = {'face': (0.41, 0.37, 0.15, 0.16), 'figure': (0.42, 0.55, 0.40, 0.50)}
 AREAS = {}         # v4 area masks (bg, skin, hair, clothes, face, features), set by planes.area_masks()
+CLIPS = {}         # v4: area name -> soft 0..1 mask a block-in stroke is held inside (a painter cuts in along the silhouette)
 FEATURES = []      # focal ellipses [cx, cy, rx, ry]: eyes, mouth, nose, lenses (focus weight >= .95), set by plan()
 EYE_FEATURES = set()   # indices of the features that hold an eye
 LINE_FEATURES = []     # crisp-edged features (focus weight 1.0: eyes, lips, glasses) that get the 勾勒 lines; a soft feature
