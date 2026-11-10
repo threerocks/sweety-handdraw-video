@@ -20,12 +20,16 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 import paint
+import media
 from paint import W, H, render, commit, geometry, shade
 
 sys.path.insert(0, str(paint.SKILL))
 from motion_profile import distance_fraction  # noqa: E402
 
 HERE = Path(__file__).parent
+KIND = ['oil']                         # oil | sketch (素描, paper) | anime (动漫插画, layers): set from plan.json
+TITLES = {'oil': '油画肖像写生', 'sketch': '素描肖像', 'anime': '动漫插画'}
+TOOLS = HERE / 'src' / 'tools-sketch.png'
 FW, FH, FPS = 1280, 1920, 30
 CX, CY = 80, 150                       # canvas origin in the film
 TRAY = (80, 1604, 790, 284)            # palette tray x, y, w, h
@@ -75,6 +79,18 @@ def stroke_seconds(st, L):
         return .05 + L / 450
     if m == 'sign':
         return .1 + L / 240
+    if m == 'graphite':
+        return .04 + L / 520
+    if m == 'stump':
+        return .08 + L / 380
+    if m == 'eraser':
+        return .06 + L / 400
+    if m == 'pen':
+        return .08 + L / 260
+    if m == 'cel':
+        return .06 + L / (500 + 25 * R)
+    if m == 'air':
+        return .06 + L / 700
     return .12 + L / (260 + 16 * R)
 
 
@@ -106,9 +122,47 @@ def floor(e):
         return 1.875 * d / (HAND_PX * FPS)
     if e['kind'] == 'mix' and e.get('trip'):
         return 1.875 * d / (HAND_PX * FPS) * e['real'] / max(1e-6, e['go'])   # the outbound move gets go/real of it
-    if e['kind'] == 'stroke' and e['L'] > 200:
-        return 1.875 * e['L'] / (STROKE_PX * FPS)
+    if e['kind'] == 'stroke' and e.get('floorL', e['L']) > 200:
+        return 1.875 * e.get('floorL', e['L']) / (STROKE_PX * FPS)
     return 0.
+
+
+GROUP_HOP = 90.         # sketch/anime: a lift shorter than this between strokes is part of one hatching motion
+GROUP_REAL = 1.6        # seconds of life-pace drawing one grouped motion holds at most
+
+
+def group_events(evs):
+    """Hatching, strands, fills: strokes laid one after another a few pixels apart are one motion of the hand (it
+    stays down on the paper), filmed as one event that lays its strokes as the hand passes them. Fewer, longer
+    events keep a pass of thousands of short strokes readable, and its time spent drawing rather than hopping."""
+    out, cur = [], None
+    i = 0
+    while i < len(evs):
+        e = evs[i]
+        nxt = evs[i + 1] if i + 1 < len(evs) else None
+        if e['kind'] == 'travel' and nxt is not None and nxt['kind'] == 'stroke' and not nxt['slow'] and not e['slow']:
+            hop = float(np.linalg.norm(nxt['path'][0] - cur['path'][-1])) if cur is not None else 1e9
+            if hop < GROUP_HOP and cur['real'] + nxt['real'] < GROUP_REAL:
+                seg = np.linspace(cur['path'][-1], nxt['path'][0], max(2, int(hop / 3) + 2))[1:]
+                seg_s = cur['s'][-1] + np.cumsum(np.linalg.norm(np.diff(np.vstack([cur['path'][-1:], seg]), axis=0), axis=1))
+                start = seg_s[-1]
+                cur['path'] = np.vstack([cur['path'], seg, nxt['path'][1:]])
+                cur['s'] = np.r_[cur['s'], seg_s, start + nxt['s'][1:]]
+                cur['group'].append((nxt['st'], start, start + nxt['L']))
+                cur['real'] += nxt['real'] + .02 + hop / 2500
+                cur['L'] = float(cur['s'][-1])
+                cur['floorL'] = max(cur['floorL'], nxt['L'])
+                i += 2
+                continue
+            cur = dict(nxt, group=[(nxt['st'], 0., nxt['L'])], floorL=nxt['L'], path=nxt['path'].copy(), s=nxt['s'].copy())
+            out += [e, cur]
+            i += 2
+            continue
+        out.append(e)
+        if e['kind'] != 'pause':
+            cur = None
+        i += 1
+    return out
 
 
 def video_time(evs, lap):
@@ -283,12 +337,85 @@ class Hand:
         return np.asarray(out)
 
 
+# ---------------------------------------------------------------------------------------------- surfaces
+class OilSurface:
+    """Oil: canvas colour, paint relief and paint thickness, lit by a raking light for display."""
+    kind = 'oil'
+
+    def __init__(self, ground, tooth):
+        self.canvas = np.tile(np.asarray(ground, float), (H, W, 1))
+        self.height, self.thick, self.tooth = np.zeros((H, W)), np.zeros((H, W)), tooth
+
+    def render(self, st):
+        return render(st, self.canvas, self.height, self.thick, self.tooth, apply=False)
+
+    def commit(self, p, upto=None):
+        commit(p, self.canvas, self.height, self.thick, upto=upto)
+
+    def save(self, p):
+        gy, gx = p['gy'], p['gx']
+        return self.canvas[gy, gx].copy(), self.height[gy, gx].copy(), self.thick[gy, gx].copy()
+
+    def restore(self, p, saved):
+        gy, gx = p['gy'], p['gx']
+        self.canvas[gy, gx], self.height[gy, gx], self.thick[gy, gx] = saved
+
+    def image(self):
+        return shade(self.canvas, self.height, self.thick, self.tooth)
+
+
+def make_surface(plan, d, tooth):
+    kind = plan.get('kind', 'oil')
+    if kind == 'sketch':
+        ground = np.load(d / 'ground.npy').astype(float)
+        media.set_paper(tooth.astype(np.float32), ground)
+        for f in d.glob('level-*.npy'):
+            media.LEVELS[f.stem[6:]] = np.load(f).astype(np.float32)
+        return media.PaperSurface(ground)
+    if kind == 'anime':
+        for f in d.glob('level-*.npy'):
+            media.LEVELS[f.stem[6:]] = np.load(f).astype(np.float32)
+        for f in d.glob('alpha-*.npy'):
+            media.ALPHAS[f.stem[6:]] = np.load(f).astype(np.float32)
+        return media.LayerSurface(plan.get('ground', (1., 1., 1.)), plan.get('layers', ('rough', 'line')))
+    return OilSurface(plan.get('ground', paint.CANVAS_RGB), tooth)
+
+
+class Swatches:
+    """Anime: the drawing app's colour panel, the current colour large and the recent ones in a row."""
+
+    def __init__(self):
+        self.recent = []
+        self.cache = {}
+
+    def image(self, rgb):
+        key = None if rgb is None else tuple(np.round(np.asarray(rgb) * 255).astype(int))
+        if key is not None and (not self.recent or self.recent[-1] != key):
+            if key in self.recent:
+                self.recent.remove(key)
+            self.recent.append(key)
+            self.recent = self.recent[-14:]
+        ck = (key, tuple(self.recent))
+        if ck not in self.cache:
+            x, y, w, h = TRAY
+            img = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+            dr = ImageDraw.Draw(img)
+            if key is not None:
+                dr.ellipse([40, 76, 176, 212], fill=key, outline=(205, 198, 188), width=3)
+            for i, c in enumerate(reversed(self.recent[:-1] if key else self.recent)):
+                cx, cy = 236 + (i % 7) * 76, 104 + (i // 7) * 78
+                dr.rounded_rectangle([cx - 28, cy - 28, cx + 28, cy + 28], 12, fill=c, outline=(214, 208, 198), width=2)
+            self.cache = {ck: img}
+        return self.cache[ck]
+
+
 # ---------------------------------------------------------------------------------------------- layout
 def font(path, size, index=0):
     return ImageFont.truetype(path, size, index=index)
 
 
-def base_frame(reference, watermark=True):
+def base_frame(reference, watermark=True, kind=None):
+    kind = kind or KIND[0]
     img = Image.new('RGB', (FW, FH), tuple(BG.astype(int)))
     yy, xx = np.mgrid[0:FH, 0:FW]
     vign = 1 - .07 * (((xx - FW / 2) / FW) ** 2 + ((yy - FH * .45) / FH) ** 2) * 2.4
@@ -298,7 +425,8 @@ def base_frame(reference, watermark=True):
     d = ImageDraw.Draw(shadow)
     d.rectangle([CX + 4, CY + 10, CX + W + 4, CY + H + 14], fill=120)
     x, y, w, h = TRAY
-    d.rounded_rectangle([x + 3, y + 8, x + w + 3, y + h + 10], 30, fill=90)
+    if kind != 'sketch':
+        d.rounded_rectangle([x + 3, y + 8, x + w + 3, y + h + 10], 30, fill=90)
     px, py, pw, ph = PHOTO
     d.rectangle([px - 6, py - 2, px + pw + 14, py + ph + 14], fill=90)
     shadow = shadow.filter(ImageFilter.GaussianBlur(14))
@@ -314,7 +442,15 @@ def base_frame(reference, watermark=True):
     tape = Image.new('RGBA', (110, 34), (226, 214, 180, 200))
     tape = tape.rotate(4, Image.BICUBIC, expand=True)
     img.paste(tape, (px + pw // 2 - 58, py - 22), tape)
-    d.text((CX, 38), '油画肖像写生', font=font(FONT_HAND, 52), fill=INK)
+    if kind == 'sketch' and TOOLS.exists():       # the pencils, stump and erasers laid out below the drawing board
+        tools = Image.open(TOOLS).convert('RGBA')
+        k = min((w + 40) / tools.width, (h + 40) / tools.height)
+        tools = tools.resize((round(tools.width * k), round(tools.height * k)), Image.LANCZOS)
+        img.paste(tools, (x - 20, y + (h - tools.height) // 2), tools)
+    elif kind == 'anime':                          # the drawing app's colour panel (swatches are drawn per frame)
+        d.rounded_rectangle([x, y, x + w, y + h], 26, fill=(250, 249, 247), outline=(214, 208, 198))
+        d.text((x + 28, y + 20), '颜色', font=font(FONT_SANS, 26), fill=(120, 112, 104))
+    d.text((CX, 38), TITLES.get(kind, TITLES['oil']), font=font(FONT_HAND, 52), fill=INK)
     if not watermark:
         return np.asarray(img).copy()
     wm_layer = watermark_layer()
@@ -416,7 +552,7 @@ def build(plan, palette):
                     slow = EARLY_LAPSE
                 elif st.get('cut'):           # cutting in around a line is cleanup, not the line itself
                     slow = FEATURE_LAPSE
-            if key != last_key:
+            if key != last_key and KIND[0] == 'oil':
                 # one visible palette visit when the focal work of a pass begins; later mixes in it are picked up off-screen
                 first = last_key is None or (slow and not focal_trip)
                 focal_trip = focal_trip or bool(slow and first)
@@ -441,6 +577,8 @@ def build(plan, palette):
             if need > feature_cap:
                 for e in others:
                     e['slow'] = base * need / feature_cap
+        if KIND[0] != 'oil':
+            evs = group_events(evs)
         timeline.append(evs)
 
     def settle(evs, tip, decide):
@@ -522,17 +660,20 @@ def main():
     ap.add_argument('--intro', type=float, default=1.2)
     ap.add_argument('--outro', type=float, default=3.5)
     ap.add_argument('--length', type=float, default=None, help='fit the film to about this many seconds (a short cut)')
-    ap.add_argument('--hand', default=str(HAND), help='transparent hand asset (optional sidecar .json: nib, scale)')
+    ap.add_argument('--hand', default=None, help='transparent hand asset (optional sidecar .json: nib, scale); default: '
+                    'the brush hand for oil, the pencil hand for a sketch, the stylus hand for anime')
     args = ap.parse_args()
     d = Path(args.plan_dir)
     plan = json.loads((d / 'plan.json').read_text())
+    KIND[0] = plan.get('kind', 'oil')
     tooth = np.load(d / 'tooth.npy').astype(float)
     for f in d.glob('clip-*.png'):                                  # v4: the areas the block-in strokes are held inside
         paint.CLIPS[f.stem[5:]] = np.asarray(Image.open(f), np.float32) / 255
     reference = np.asarray(Image.open(d / 'reference.png').convert('RGB'))
     rng = np.random.default_rng(3)
     palette = Palette(rng)
-    hand = Hand(args.hand)
+    default_hand = {'sketch': HERE / 'src' / 'hand-tang-pencil.png', 'anime': HERE / 'src' / 'hand-tang-stylus.png'}
+    hand = Hand(args.hand or default_hand.get(KIND[0], HAND))
     labels = list(dict.fromkeys(p['label'] for p in plan['passes']))     # passes sharing a name share one label
     label_of = [labels.index(p['label']) for p in plan['passes']] + [len(labels)]
     rows = [pass_row(labels, k) for k in range(len(labels) + 1)]
@@ -591,9 +732,12 @@ def main():
     ff = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{FW}x{FH}', '-r', str(FPS),
                            '-i', '-', '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-pix_fmt', 'yuv420p',
                            '-movflags', '+faststart', str(out_path)], stdin=subprocess.PIPE)
-    canvas = np.tile(np.array(plan.get('ground', paint.CANVAS_RGB)), (H, W, 1))    # v4: a toned canvas, no wash pass
-    height = np.zeros((H, W))
-    thick = np.zeros((H, W))
+    surf = make_surface(plan, d, tooth)              # oil: a toned canvas (v4: no wash pass); sketch: paper; anime: layers
+    swatches = Swatches() if KIND[0] == 'anime' else None
+    hide_at = {}                                     # anime: a layer hidden when a pass starts (the rough sketch)
+    for e in events:
+        for n in plan['passes'][min(e['pi'], len(plan['passes']) - 1)].get('hide', []) if e['kind'] not in ('hold', 'enter', 'leave') else []:
+            hide_at.setdefault(n, e['v0'])
     patches = {}
     ei = 0
     paint_rgb = None
@@ -605,16 +749,33 @@ def main():
     def ensure(e):
         if id(e) not in patches:
             if e['kind'] == 'stroke':
-                patches[id(e)] = render(e['st'], canvas, height, thick, tooth, apply=False)
+                patches[id(e)] = surf.render(e['st'])
             else:
                 patches[id(e)] = palette.smear(e['rgb'], e['smear_pts'])[1]
         return patches[id(e)]
 
+    def advance(e, s_now):
+        """A grouped motion: lay every stroke the hand has passed; return the one under it and how far along."""
+        g, j = e['group'], e.get('done', 0)
+        while j < len(g) and g[j][2] <= s_now:
+            p = patches.pop((id(e), j), None) or surf.render(g[j][0])
+            if p is not None:
+                surf.commit(p)
+            j += 1
+        e['done'] = j
+        if j < len(g) and g[j][1] <= s_now:
+            if (id(e), j) not in patches:
+                patches[(id(e), j)] = surf.render(g[j][0])
+            return patches[(id(e), j)], s_now - g[j][1]
+        return None, 0.
+
     def finish(e):
-        if e['kind'] == 'stroke':
+        if e['kind'] == 'stroke' and 'group' in e:
+            advance(e, float('inf'))
+        elif e['kind'] == 'stroke':
             p = ensure(e)
             if p is not None:
-                commit(p, canvas, height, thick)
+                surf.commit(p)
         elif e['kind'] == 'mix':
             p = ensure(e)
             if p is not None:
@@ -622,6 +783,7 @@ def main():
         patches.pop(id(e), None)
 
     last_stroke_rgb = None
+    last_colour = [None]
     tips = []
     for f in range(nframes):
         tf = f / FPS
@@ -638,11 +800,10 @@ def main():
         lift, partial, ppartial = 1., None, None
         k = e['kind']
         if k == 'stroke':
-            p = ensure(e)
             s_now = e['L'] * distance_fraction(tau, 'minjerk')
             tip = along(e['path'], e['s'], s_now)
             lift = 0.
-            partial = (p, s_now)
+            partial = advance(e, s_now) if 'group' in e else (ensure(e), s_now)
             paint_rgb = e['rgb']
         elif k in ('travel', 'enter', 'leave'):
             u = distance_fraction(tau, 'minjerk')
@@ -682,28 +843,36 @@ def main():
         saved = None
         if partial and partial[0] is not None:
             p, s_now = partial
-            gy, gx = p['gy'], p['gx']
-            saved = (canvas[gy, gx].copy(), height[gy, gx].copy(), thick[gy, gx].copy())
-            commit(p, canvas, height, thick, upto=s_now)
+            saved = surf.save(p)
+            surf.commit(p, upto=s_now)
+        for n, t0 in hide_at.items():
+            surf.shown[n] = float(np.clip(1 - (tf - t0) / .6, 0, 1))
         frame = base.copy()
-        frame[CY:CY + H, CX:CX + W] = (shade(canvas, height, thick, tooth) * 255).astype(np.uint8)
+        frame[CY:CY + H, CX:CX + W] = (np.clip(surf.image(), 0, 1) * 255).astype(np.uint8)
         if saved is not None:
-            canvas[gy, gx], height[gy, gx], thick[gy, gx] = saved
-        # palette
-        psaved = None
-        if ppartial:
-            p, s_now = ppartial
-            pgy, pgx = p['gy'], p['gx']
-            psaved = (palette.rgb[pgy, pgx].copy(), palette.height[pgy, pgx].copy(), palette.thick[pgy, pgx].copy())
-            commit(p, palette.rgb, palette.height, palette.thick, upto=s_now)
-        tray = palette.image() * 255
-        if psaved is not None:
-            palette.rgb[pgy, pgx], palette.height[pgy, pgx], palette.thick[pgy, pgx] = psaved
-        region = frame[tray_y:tray_y + th, tray_x:tray_x + tw].astype(float)
-        m = palette.mask[..., None]
-        frame[tray_y:tray_y + th, tray_x:tray_x + tw] = (region * (1 - m) + tray * m).astype(np.uint8)
-        # pass label
+            surf.restore(p, saved)
+        # palette (oil), the colour panel (anime); a sketch's tools are part of the base frame
+        if KIND[0] == 'oil':
+            psaved = None
+            if ppartial:
+                p, s_now = ppartial
+                pgy, pgx = p['gy'], p['gx']
+                psaved = (palette.rgb[pgy, pgx].copy(), palette.height[pgy, pgx].copy(), palette.thick[pgy, pgx].copy())
+                commit(p, palette.rgb, palette.height, palette.thick, upto=s_now)
+            tray = palette.image() * 255
+            if psaved is not None:
+                palette.rgb[pgy, pgx], palette.height[pgy, pgx], palette.thick[pgy, pgx] = psaved
+            region = frame[tray_y:tray_y + th, tray_x:tray_x + tw].astype(float)
+            m = palette.mask[..., None]
+            frame[tray_y:tray_y + th, tray_x:tray_x + tw] = (region * (1 - m) + tray * m).astype(np.uint8)
         pil = Image.fromarray(frame)
+        if swatches is not None:
+            cur = e['st']['rgb'] if e['kind'] == 'stroke' and e['st']['medium'] in ('cel', 'air') else last_colour[0]
+            if e['kind'] == 'stroke' and e['st']['medium'] in ('cel', 'air'):
+                last_colour[0] = cur
+            sw = swatches.image(cur)
+            pil.paste(sw, (tray_x, tray_y), sw)
+        # pass label
         row = rows[label_of[min(e['pi'], len(label_of) - 1)]]
         pil.paste(row, (CX, 98), row)
         frame = np.asarray(pil).copy()
@@ -714,7 +883,7 @@ def main():
         angle += (target - angle) * .35
         tip_prev = tip
         strength = .6 if (paint_rgb is not None and e.get('st', {}).get('medium') == 'pencil') else .85
-        frame = hand.draw(frame, tip, lift, paint_rgb, angle, strength)
+        frame = hand.draw(frame, tip, lift, paint_rgb if KIND[0] == 'oil' else None, angle, strength)
         tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi'])])
         header = frame[:HEADER + HEADER_FADE].astype(float) if zoom[f] > 1.001 else None
         frame = apply_camera(frame, zoom[f], cam_x[f], cam_y[f])
