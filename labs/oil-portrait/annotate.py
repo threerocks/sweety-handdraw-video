@@ -31,6 +31,18 @@ class AnnotationError(RuntimeError):
 
 
 def landmarks(picture):
+    try:                                   # the cached landmarks make.py keeps (same picture, same numbers)
+        import make
+    except ImportError:
+        make = None
+    if make is not None:
+        try:
+            lm = make.landmarks(picture)
+        except make.Stop as e:
+            raise AnnotationError(str(e))
+        if not lm.get('ok'):
+            raise AnnotationError(f'no face found in {picture}')
+        return lm
     if not FACE_PY.exists():
         raise AnnotationError(f'face landmark environment missing: run  python make.py setup  (expects {FACE_PY})')
     r = subprocess.run([str(FACE_PY), str(HERE / 'landmarks.py'), str(picture)], capture_output=True, text=True)

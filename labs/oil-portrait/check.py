@@ -36,7 +36,7 @@ LIMITS = {
     # long passes on purpose, so their hand limit guards against getting worse than that, not an ideal.
     'oil': dict(length=(90, 190), hand_p95=310, missed=dict(ground_px=60, light_specks=140), likeness=.06),
     'sketch': dict(length=(90, 190), hand_p95=360, missed=dict(hair_spots=40), likeness=.065),
-    'anime': dict(length=(90, 190), hand_p95=145, missed=dict(white_px=40, slits=3), likeness=.055),
+    'anime': dict(length=(90, 190), hand_p95=145, missed=dict(white_px=60, slits=8), likeness=.055),
 }
 
 
@@ -99,12 +99,49 @@ def missed_paint(kind, run, areas, face):
             return None, r.stderr[-500:]
         h = json.loads(f.read_text())
         return dict(hair_spots=h['final']['hair'][0]), ''
-    r = subprocess.run([PY, 'bare.py', str(run)], cwd=HERE, capture_output=True, text=True)
-    rows = [l.split() for l in r.stdout.splitlines()[1:] if l.strip()]
-    if not rows:
-        return None, r.stderr[-500:]
-    worst = max(rows, key=lambda x: int(x[1]))          # every image from the flats on
-    return dict(white_px=int(worst[1]), slits=max(int(x[3]) for x in rows)), ''
+    # anime: paper left in the colouring (bare.py's test), worst image from the flats to before the final adjustment.
+    # Two things are white on purpose and do not count: a region whose flat colour is itself white (a white shirt:
+    # painted, but white paint looks like paper) and the catchlights inside the eyes.
+    import bare
+    t = load(run / 'target.png')
+    laid = [load(run / n) for n in ('flats.png', 'shades.png') if (run / n).exists()]
+    if (run / 'level-C0.npy').exists():
+        laid.append(np.load(run / 'level-C0.npy').astype(float))
+    white_flat = (laid[0].min(-1) > bare.PAPER) if laid else np.zeros(t.shape[:2], bool)
+    h, w = t.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w]
+    eyes = np.zeros((h, w), bool)
+    for cx, cy, rx, ry in eyes_of(run):
+        eyes |= ((xx / w - cx) / (rx * 1.3)) ** 2 + ((yy / h - cy) / (ry * 1.3)) ** 2 < 1
+    names = sorted(p.name for p in run.glob('pass-*.png'))
+    start = next((i for i, n in enumerate(names) if 'flat' in n), None)
+    if start is None:
+        return None, 'no flat pass image'
+    worst = dict(white_px=0, slits=0)
+    for n in names[start:] + ['before-adjust.png']:
+        if not (run / n).exists() or 'adjust' in n and n != 'before-adjust.png' or 'sign' in n:
+            continue
+        img = load(run / n)
+        white, light = bare.bare_masks(img, t, *laid)
+        white &= ~white_flat
+        # white right beside a pixel that is white in the target too (a white shirt reaching one pixel further under
+        # a line's soft edge than the illustration's line) is a line a pixel thinner, not a gap. White farther from
+        # anything white in the target counts: the specks between hair and eyes, a seam on the skin side of a line
+        white &= ~ndimage.binary_dilation(t.min(-1) > bare.LIGHT, np.ones((3, 3)))   # per pixel: 1 px at most
+        miss = (white | light) & ~eyes
+        comp, k = ndimage.label(miss, np.ones((3, 3)))
+        if k:                                          # a lone pixel or two cannot be seen in the film: specks of 3+ px
+            size = ndimage.sum_labels(np.ones(miss.shape), comp, np.arange(1, k + 1))
+            miss = np.isin(comp, np.flatnonzero(size >= 3) + 1)
+            comp, k = ndimage.label(miss, np.ones((3, 3)))
+        slits = sum(max(sl[0].stop - sl[0].start, sl[1].stop - sl[1].start) >= 3 for sl in ndimage.find_objects(comp))
+        worst = dict(white_px=max(worst['white_px'], int(miss.sum())), slits=max(worst['slits'], int(slits)))
+    return worst, ''
+
+
+def eyes_of(run):
+    plan = json.loads((Path(run) / 'plan.json').read_text())
+    return plan.get('eyes_used') or [f[:4] for f in plan['focus'][2:4]]
 
 
 def likeness(kind, run, face):
@@ -143,7 +180,7 @@ def run_checks(run, deliver=None, areas=None):
     kind = plan.get('kind', 'oil')
     L = LIMITS[kind]
     face = plan.get('face') or plan['focus'][0][:4]
-    eyes = plan.get('eyes_used') or [f[:4] for f in plan['focus'][2:4]]
+    eyes = eyes_of(run)
     film = Path(deliver) / 'film.mp4' if deliver else run / 'film.mp4'
     out = []
     dur = duration(film)

@@ -197,6 +197,83 @@ def cli_help_and_status():
     assert r.returncode != 0 and '找不到照片' in r.stdout, r.stdout[-300:]
 
 
+@test
+def shared_picture_is_drawn_once():
+    """--kind all: three threads ask for the same line drawing; the image model must be called once (2026-11-12:
+    racing threads drew it three times and overwrote each other, so the kinds planned on different pictures)."""
+    import threading
+    import time
+    need(S7 / 'sketch.png')
+    calls = []
+    real = make.codex_image
+
+    def fake(prompt, out, refs, log):
+        calls.append(out)
+        time.sleep(.5)
+        shutil.copy(S7 / 'sketch.png', out)
+    make.codex_image = fake
+    try:
+        with tempfile.TemporaryDirectory() as t:
+            out = Path(t) / 'sketch.png'
+            notes = []
+            th = [threading.Thread(target=lambda: notes.append(make.generate('lines', 'p.txt', [], out,
+                                                                                lambda p: (True, 'ok'), Path(t) / 'log')))
+                  for _ in range(3)]
+            [x.start() for x in th]
+            [x.join() for x in th]
+            assert len(calls) == 1, f'the image model was called {len(calls)} times for one picture'
+            assert out.exists() and len(notes) == 3
+    finally:
+        make.codex_image = real
+
+
+@test
+def landmarks_are_cached():
+    need(S7 / 'subject.png')
+    a = make.landmarks(S7 / 'subject.png')
+    b = make.landmarks(S7 / 'subject.png')
+    assert a == b, 'the same picture gave different landmarks'
+
+
+@test
+def plans_are_deterministic():
+    """The same inputs give the same plan, byte for byte (anime: the quickest engine to plan)."""
+    import hashlib
+    job = ROOT / 'output/portrait/s7-auto'
+    need(job / 'annotations-anime.json')
+    A = ROOT / 'output/portrait/.assets' / json.loads((job / 'manifest.json').read_text())['sha']
+    a = json.loads((job / 'annotations-anime.json').read_text())
+    j = json.dumps
+    with tempfile.TemporaryDirectory() as t:
+        hashes = []
+        for k in range(2):
+            run = Path(t) / f'r{k}'
+            subprocess.run([sys.executable, 'anime.py', A / 'target-anime.png', A / 'sketch.png', A / 'anime-areas.png', run,
+                            j(a['focus']), j(a['eyes']), j(a['signature']), '--photo', A / 'subject.png', '--face',
+                            j(a['face']), '--crop-top', '0', '--lineart', A / 'anime-lineart.png'], cwd=HERE,
+                           capture_output=True)
+            hashes.append(hashlib.sha256((run / 'plan.json').read_bytes()).hexdigest())
+        assert hashes[0] == hashes[1], 'two plans from the same inputs differ'
+
+
+@test
+def missed_paint_detector_separates():
+    """The anime check: the v1 film the user saw white specks in fails clearly; the v2 film passes; a white shirt
+    (painted white) and catchlights are not counted (s6, 2026-11-12)."""
+    bad, good = ROOT / 'output/oil/s7/anime/run3', ROOT / 'output/oil/s7/anime-v2/run13'
+    need(bad / 'plan.json')
+    need(good / 'plan.json')
+    lim = check.LIMITS['anime']['missed']
+    b = check.missed_paint('anime', bad, None, None)[0]
+    g = check.missed_paint('anime', good, None, None)[0]
+    assert b['white_px'] > 10 * lim['white_px'], b
+    assert g['white_px'] <= lim['white_px'] and g['slits'] <= lim['slits'], g
+    shirt = ROOT / 'output/portrait/subject-55d5f4/anime/plan'
+    if (shirt / 'plan.json').exists():
+        s = check.missed_paint('anime', shirt, None, None)[0]
+        assert s['white_px'] <= lim['white_px'], s
+
+
 if __name__ == '__main__':
     for name, fn in list(globals().items()):
         if callable(fn) and getattr(fn, '__name__', '') == name and name not in ('test', 'need', 'SkipTest') \

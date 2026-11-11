@@ -178,11 +178,22 @@ def iris_rings(F1, areas, eyes):
     return out
 
 
-def under_lines(A, la):
-    """The colours under the line art: each line pixel takes the colour of the nearest pixel beside the line."""
+def under_lines(A, la, lab=None):
+    """The colours under the line art: each line pixel takes the colour of the nearest pixel beside the line. With an
+    area label map, the nearest pixel of its own area: a line between skin and a white shirt is skin-coloured on the
+    skin side. (Taking whichever side is nearer put white under the skin edge of the line; where the drawn line sits a
+    pixel off the illustration's own line, the airbrush then painted a light seam along the neck. s6, 2026-11-12.)"""
     m = ndimage.binary_dilation(la > .08, iterations=1)
     _, (iy, ix) = ndimage.distance_transform_edt(m, return_indices=True)
     c0 = A[iy, ix]
+    if lab is not None:
+        for k in np.unique(lab[m]):
+            src = ~m & (lab == k)
+            if src.sum() < 50:
+                continue
+            _, (jy, jx) = ndimage.distance_transform_edt(~src, return_indices=True)
+            here = m & (lab == k)
+            c0[here] = A[jy[here], jx[here]]
     return ndimage.median_filter(c0, size=(3, 3, 1))
 
 
@@ -776,7 +787,7 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
         areas['person'] = ~areas['bg']
     la_own = line_art(A)
     la, la_own = with_clean_lines(A, la_own, lineart_path, areas, eyes) if lineart_path else (la_own, la_own)
-    C0 = under_lines(A, la_own)                   # the colours under the illustration's own lines
+    C0 = under_lines(A, la_own, lab4)             # the colours under the illustration's own lines
     areas['eyes'] = eye_area(C0, eyes)
     areas['skin'] &= ~areas['eyes']
     F1, F2, flats, shades, flat_lab, shade_lab = take_apart(C0, areas, rng)

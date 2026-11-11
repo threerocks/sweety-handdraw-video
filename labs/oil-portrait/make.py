@@ -57,6 +57,8 @@ TRACKS = {
 STAGES = ['subject', 'assets', 'annotate', 'plan', 'film', 'deliver', 'check']
 TRIES = 3                                        # image-model attempts per picture before giving up
 LOCK = threading.Lock()
+ASSET_LOCKS = {}          # one lock per generated picture: with --kind all the three kinds share the line drawing and
+                          # the area map, which must be drawn once (racing threads overwrote each other's pictures)
 
 
 class Stop(RuntimeError):
@@ -116,10 +118,19 @@ def setup(install=True):
 
 # ------------------------------------------------------------------------------------------------- pictures
 def landmarks(path):
+    """Face landmarks of a picture, cached by its content: MediaPipe's numbers move by a fraction of a pixel with the
+    machine's load, and the plans follow them, so the same picture must always give the same landmarks."""
+    key = hashlib.sha256(Path(path).read_bytes()).hexdigest()[:20]
+    cache = OUT / '.assets' / '.landmarks' / f'{key}.json'
+    if cache.exists():
+        return json.loads(cache.read_text())
     r = subprocess.run([str(FACE_PY), str(HERE / 'landmarks.py'), str(path)], capture_output=True, text=True)
     if r.returncode:
         raise Stop(f'人脸关键点失败：{path}\n{r.stderr[-800:]}')
-    return json.loads(r.stdout)
+    lm = json.loads(r.stdout)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(lm))
+    return lm
 
 
 def crop_subject(photo, dst):
@@ -263,13 +274,21 @@ def check_areas(path, photo_lm):
 
 
 def generate(name, prompt_file, refs, out, validate, log):
-    """Draw one picture with the image model; validate it; up to TRIES attempts. Returns the validation note."""
+    """Draw one picture with the image model; validate it; up to TRIES attempts. Returns the validation note. A picture
+    another thread is already drawing is waited for, not drawn again."""
+    with LOCK:
+        lock = ASSET_LOCKS.setdefault(str(out), threading.Lock())
+    with lock:
+        return _generate(name, prompt_file, refs, out, validate, log)
+
+
+def _generate(name, prompt_file, refs, out, validate, log):
     if out.exists() and (out.with_suffix('.ok.json')).exists():
         return json.loads(out.with_suffix('.ok.json').read_text())['note']
     last = ''
     for k in range(1, TRIES + 1):
         say(f'  生成 {name}（第 {k} 次）…')
-        tmp = out.with_name(f'{out.stem}-try{k}.png')
+        tmp = out.with_name(f'{out.stem}-try{k}-{os.getpid()}-{threading.get_ident()}.png')
         try:
             codex_image(prompt_file, tmp, refs, log)
             normalise(tmp)
