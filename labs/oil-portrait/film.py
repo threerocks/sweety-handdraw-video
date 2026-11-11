@@ -385,6 +385,50 @@ class Hand:
         return np.asarray(out)
 
 
+class Cursor:
+    """No hand: the pen tip as a tablet drawing app shows it (viewer feedback, 2026-11-12: "其实没有那只手是更好的…用苹果的
+    笔触来代替，一笔笔画完"). While drawing: a ring the size of the brush with a dot of the current colour; lifted: a
+    fainter, slightly larger hover ring. A white ring with a dark edge reads on light paper and on dark hair alike."""
+    SS = 4                                            # supersampling for a clean ring
+
+    def draw(self, frame, tip, lift, rgb, size=6., tool='pencil', alpha=1.):
+        if alpha <= .01:
+            return frame
+        x, y = float(tip[0]), float(tip[1])
+        Hf, Wf = frame.shape[:2]
+        r = float(np.clip(size, 6., 34.)) * (1 + .25 * lift)
+        half = int(r + 6)
+        ox, oy = int(math.floor(x)) - half, int(math.floor(y)) - half
+        n = 2 * half + 2
+        if ox + n <= 0 or oy + n <= 0 or ox >= Wf or oy >= Hf:
+            return frame
+        S = self.SS
+        cx, cy = (x - ox) * S, (y - oy) * S
+        patch = Image.new('RGBA', (n * S, n * S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(patch)
+
+        def ring(rad, width, colour):
+            d.ellipse([cx - rad * S, cy - rad * S, cx + rad * S, cy + rad * S], outline=colour, width=max(1, int(width * S)))
+        ring(r + 1.3, 1.4, (25, 25, 25, 140))
+        ring(r, 2.1, (255, 255, 255, 240))
+        ring(r - 1.6, 1.0, (25, 25, 25, 100))
+        if lift < .5:
+            fill = {'eraser': (250, 250, 250), 'stump': (190, 190, 190)}.get(
+                tool, tuple(int(v * 255) for v in (rgb if rgb is not None else (.25, .25, .25))))
+            dr = min(max(3.2, r * .3), 6.5)
+            d.ellipse([cx - (dr + 1.2) * S, cy - (dr + 1.2) * S, cx + (dr + 1.2) * S, cy + (dr + 1.2) * S],
+                      fill=(255, 255, 255, 230))
+            d.ellipse([cx - dr * S, cy - dr * S, cx + dr * S, cy + dr * S], fill=fill + (255,))
+        patch = patch.resize((n, n), Image.LANCZOS)
+        a = np.asarray(patch, float)
+        x0, y0, x1, y1 = max(0, ox), max(0, oy), min(Wf, ox + n), min(Hf, oy + n)
+        sub = a[y0 - oy:y1 - oy, x0 - ox:x1 - ox]
+        k = sub[..., 3:4] / 255 * alpha * (1 - .35 * lift)
+        out = frame.copy()
+        out[y0:y1, x0:x1] = (out[y0:y1, x0:x1] * (1 - k) + sub[..., :3] * k).astype(np.uint8)
+        return out
+
+
 # ---------------------------------------------------------------------------------------------- surfaces
 class OilSurface:
     """Oil: canvas colour, paint relief and paint thickness, lit by a raking light for display."""
@@ -774,8 +818,8 @@ def main():
     ap.add_argument('--cover', default=None, help="opening cover: an image the size of a film frame, or 'none'; default: "
                     "the film's own last frame (the finished picture)")
     ap.add_argument('--length', type=float, default=None, help='fit the film to about this many seconds (a short cut)')
-    ap.add_argument('--hand', default=None, help='transparent hand asset (optional sidecar .json: nib, scale); default: '
-                    'the brush hand for oil, the pencil hand for a sketch, the stylus hand for anime')
+    ap.add_argument('--hand', default=None, help="default: no hand, a pen-tip cursor; 'tang': the Tang court lady's "
+                    "hand (brush, pencil and tools, stylus by kind); or a transparent hand asset (sidecar .json: nib, scale)")
     args = ap.parse_args()
     d = Path(args.plan_dir)
     plan = json.loads((d / 'plan.json').read_text())
@@ -788,10 +832,12 @@ def main():
     palette = Palette(rng)
     default_hand = {'oil': HERE / 'src' / 'hand-tang-red.png', 'sketch': HERE / 'src' / 'hand-tang-pencil.png',
                     'anime': HERE / 'src' / 'hand-tang-stylus.png'}
-    hand = Hand(args.hand or default_hand.get(KIND[0], HAND))
+    cursor = Cursor() if not args.hand else None
+    hand = None if cursor else Hand(default_hand.get(KIND[0], HAND) if args.hand == 'tang' else args.hand)
     hands = {'pencil': hand}
-    if KIND[0] == 'sketch' and not args.hand:
+    if KIND[0] == 'sketch' and args.hand == 'tang':
         hands.update({k: Hand(p) for k, p in TOOL_HANDS.items() if p.exists()})
+    cur_size, cur_rgb = 6., None
     held = 'pencil'
     labels = list(dict.fromkeys(p['label'] for p in plan['passes']))     # passes sharing a name share one label
     label_of = [labels.index(p['label']) for p in plan['passes']] + [len(labels)]
@@ -1023,7 +1069,23 @@ def main():
         angle += (target - angle) * .35
         tip_prev = tip
         strength = .6 if (paint_rgb is not None and e.get('st', {}).get('medium') == 'pencil') else .85
-        frame = hands.get(held, hand).draw(frame, tip, lift, paint_rgb if KIND[0] == 'oil' else None, angle, strength)
+        if cursor is not None:
+            vis, at = 1., tip
+            if k == 'enter':                           # no hand flying in: the cursor fades in where it starts
+                vis, at = tau, np.asarray(e['b'], float)
+            elif k == 'leave':
+                vis, at = 1 - tau, np.asarray(e['a'], float)
+            elif k == 'hold':
+                vis = 0.
+            if k == 'stroke':
+                st0 = e.get('st') or {}
+                cur_size = float(st0.get('R', cur_size))
+                cur_rgb = paint_rgb if KIND[0] == 'oil' else e.get('rgb', cur_rgb)
+            elif KIND[0] == 'oil' and paint_rgb is not None:
+                cur_rgb = paint_rgb
+            frame = cursor.draw(frame, at, lift, cur_rgb, size=cur_size, tool=held, alpha=vis)
+        else:
+            frame = hands.get(held, hand).draw(frame, tip, lift, paint_rgb if KIND[0] == 'oil' else None, angle, strength)
         tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi']), float(zoom[f])])
         header = frame[:HEADER + HEADER_FADE].astype(float) if zoom[f] > 1.001 else None
         frame = apply_camera(frame, zoom[f], cam_x[f], cam_y[f])
@@ -1046,7 +1108,8 @@ def main():
         Image.fromarray(frame).save(d / 'last-frame.png')
     if want_cover:
         with_cover(body_path, cover if cover is not None else frame, first_frame, out_path)
-    (d / 'tips.json').write_text(json.dumps(tips))
+    if args.until is None:                      # a partial render must not replace the full film's track (acceptance reads it)
+        (d / 'tips.json').write_text(json.dumps(tips))
     print('wrote', out_path, f'{time.time() - started:.0f}s')
 
 
