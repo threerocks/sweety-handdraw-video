@@ -46,6 +46,14 @@ KINDS = {
     'sketch': dict(prompt='target-sketch.txt', music=('calm', 21), picture='drawing', zh='素描'),
     'anime': dict(prompt='target-anime.txt', music=('curious', 5), picture='drawing', zh='动漫插画'),
 }
+MUSIC_DIR = ROOT / 'skills/sweety-handdraw-video/assets/music'      # the user's classical library (Internet Archive)
+TRACKS = {
+    # by mood of the drawing, the lists disjoint so one photo's films never share a track; the dramatic pieces (5th,
+    # Toccata, Mountain King, Habanera, Swan Lake) are never used
+    'oil': ['Debussy_Clair_de_Lune', 'Bach_Air_on_G', 'Pachelbel_Canon', 'Handel_Water_Music', 'Chopin_Nocturne'],
+    'sketch': ['Satie_Gymnopedie', 'Beethoven_Moonlight', 'Beethoven_Fur_Elise', 'Brahms_Lullaby'],
+    'anime': ['Grieg_Morning', 'Joplin_Entertainer', 'Mozart_Eine_Kleine', 'Vivaldi_Spring', 'Strauss_Blue_Danube'],
+}
 STAGES = ['subject', 'assets', 'annotate', 'plan', 'film', 'deliver', 'check']
 TRIES = 3                                        # image-model attempts per picture before giving up
 LOCK = threading.Lock()
@@ -279,6 +287,25 @@ def generate(name, prompt_file, refs, out, validate, log):
                f'若总是失败，换一张脸部更清楚、正面一些的照片。')
 
 
+def media_seconds(path):
+    r = subprocess.run(['ffprobe', '-v', '0', '-show_entries', 'format=duration', '-of', 'csv=p=0', str(path)],
+                       capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.
+
+
+def pick_track(kind, seconds, sha):
+    """A track from the library that suits the kind and outlasts the film; the photo decides which (same photo, same
+    track). None when the library is missing: the film then gets synthesised music."""
+    if not MUSIC_DIR.exists():
+        return None
+    files = sorted(MUSIC_DIR.rglob('*.mp3'))
+    fits = [f for key in TRACKS[kind] for f in files if key in f.stem and media_seconds(f) >= seconds + 2]
+    return fits[int(sha, 16) % len(fits)] if fits else None
+
+
 # ------------------------------------------------------------------------------------------------- the job
 class Job:
     def __init__(self, photo=None, name=None):
@@ -421,15 +448,27 @@ class Job:
         dur = float(subprocess.run(['ffprobe', '-v', '0', '-show_entries', 'format=duration', '-of', 'csv=p=0',
                                     str(run / 'film.mp4')], capture_output=True, text=True).stdout)
         if not music:
+            music = pick_track(kind, dur, self.sha)
+        if music:
+            say(f'[{KINDS[kind]["zh"]}] 配乐：{Path(music).stem}')
+        else:
             mood, seed = KINDS[kind]['music']
             music = self.dir / kind / f'music-{mood}.wav'
             if not music.exists():
                 sh([PY, SCRIPTS / 'music_synth.py', mood, '--seconds', f'{dur + 6:.0f}', '--seed', str(seed),
                     '--output', music], self.logs / f'music-{kind}.log')
+        self.note(f'music-{kind}', Path(music).name)
         shutil.copy(run / 'film.mp4', d / 'film-silent.mp4')
         fo = max(0., dur - 4)
+        # measure the excerpt first, then one fixed gain: a quiet opening that swells (most classical pieces) would
+        # throw a one-pass loudness normaliser off by a couple of dB
+        shape = f'atrim=0:{dur:.3f},afade=t=in:d=1,afade=t=out:st={fo:.3f}:d=4'
+        r = subprocess.run(['ffmpeg', '-hide_banner', '-nostats', '-stream_loop', '-1', '-i', str(music), '-t',
+                            f'{dur:.3f}', '-af', shape + ',ebur128', '-f', 'null', '-'], capture_output=True, text=True)
+        found = re.findall(r'I:\s+(-?[\d.]+) LUFS', r.stderr)
+        gain = -16. - float(found[-1]) if found else 0.
         sh(['ffmpeg', '-v', 'error', '-y', '-i', run / 'film.mp4', '-stream_loop', '-1', '-i', music, '-filter_complex',
-            f'[1:a]atrim=0:{dur:.3f},afade=t=in:d=1,afade=t=out:st={fo:.3f}:d=4,loudnorm=I=-16:TP=-1.5:LRA=11[a]',
+            f'[1:a]{shape},volume={gain:.2f}dB,alimiter=limit=0.89:level=false[a]',
             '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart',
             d / 'film.mp4'], self.logs / f'deliver-{kind}.log')
         shutil.copy(run / 'target.png', d / 'target.png')
@@ -459,7 +498,8 @@ class Job:
         rep['assets'] = self.manifest().get(f'assets-{kind}')
         (d / 'report.json').write_text(json.dumps(rep, ensure_ascii=False, indent=1))
         (d / 'report.md').write_text(check.markdown(rep))
-        self.note(f'result-{kind}', dict(deliver=str(d), verdict=rep['verdict'], passed=rep['passed'], total=rep['total']))
+        self.note(f'result-{kind}', dict(deliver=str(d), verdict=rep['verdict'], passed=rep['passed'], total=rep['total'],
+                                         music=self.manifest().get(f'music-{kind}')))
         return rep
 
     def one(self, kind, redo=(), music=None):
@@ -487,7 +527,8 @@ def summary(job, results):
     lines = ['', '=' * 60, f'任务 {job.name} 完成情况', '=' * 60]
     for kind, (d, rep) in results.items():
         dur = next((c['value'] for c in rep['checks'] if c['name'] == 'film_length'), '?')
-        lines.append(f"{KINDS[kind]['zh']}：验收 {rep['verdict']}（{rep['passed']}/{rep['total']}），时长 {dur} 秒")
+        music = job.manifest().get(f'music-{kind}', '')
+        lines.append(f"{KINDS[kind]['zh']}：验收 {rep['verdict']}（{rep['passed']}/{rep['total']}），时长 {dur} 秒，配乐 {music}")
         lines.append(f"  视频：{d / 'film.mp4'}")
         lines.append(f"  观看：! open {d / 'film.mp4'}")
         lines.append(f"  报告：{d / 'report.md'}")
