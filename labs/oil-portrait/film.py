@@ -73,7 +73,7 @@ PIGMENTS = [(.96, .95, .92), (.93, .81, .56), (.78, .58, .26), (.86, .32, .21), 
 # ----------------------------------------------------------------------------------------------- timing
 def stroke_seconds(st, L):
     m, R = st['medium'], st['R']
-    if st.get('seconds'):             # anime: a tap of the bucket, the last adjustment
+    if st.get('seconds'):             # anime: strokes that carry their own real duration (construction, the adjustment)
         return st['seconds']
     if m == 'wash':
         return .25 + L / 1400
@@ -120,8 +120,11 @@ def lapses(evs, cruise):
 def floor(e):
     """Shortest video time an event may take: no long lift jumps across the canvas between two frames."""
     d = e.get('dist', 0.)
-    if e['kind'] == 'stroke' and e['st'].get('hold'):     # anime: a flood or an adjustment is never shorter than this
-        return e['st']['hold']
+    if e['kind'] == 'stroke' and e['st'].get('hold'):     # anime: a stroke is on screen at least this long (colour is
+        hold = e['st']['hold']                            # never laid between two frames with the hand elsewhere)
+        if e.get('floorL', e['L']) > 200:
+            return max(hold, 1.875 * e.get('floorL', e['L']) / (STROKE_PX * FPS))
+        return hold
     if e['kind'] == 'travel' and d > JUMP:
         return 1.875 * d / (HAND_PX * FPS)
     if e['kind'] == 'mix' and e.get('trip'):
@@ -568,7 +571,7 @@ def build(plan, palette):
         focal_trip = False
         for st in ps['strokes']:
             pts, s, *_ = geometry(st)
-            if st.get('flood'):               # anime: the hand rests (bucket) or slides (adjustment) while the patch spreads
+            if st.get('flood'):               # anime: the hand slides along a slider while the adjustment eases in
                 pts, s = np.asarray(st['points'], float)[[0, -1]], np.array([0., st['flood']])
             fp = pts + [CX, CY]
             key = (pi, st['mix'])
@@ -895,8 +898,8 @@ def main():
         pil = Image.fromarray(frame)
         if swatches is not None:
             st_now = e['st'] if e['kind'] == 'stroke' else {}
-            cur = st_now['rgb'] if st_now.get('medium') in ('cel', 'air', 'bucket') else last_colour[0]
-            if st_now.get('medium') in ('cel', 'air', 'bucket'):
+            cur = st_now['rgb'] if st_now.get('medium') in ('cel', 'air') else last_colour[0]
+            if st_now.get('medium') in ('cel', 'air'):
                 last_colour[0] = cur
             if st_now and st_now['medium'] != 'adjust':
                 layer_now[0] = st_now.get('layer')

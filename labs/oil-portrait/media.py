@@ -193,25 +193,6 @@ def air(stroke, canvas):
     return patch_of(f, a, colour_of(stroke, f), layer=stroke.get('layer'))
 
 
-def bucket(stroke, canvas):
-    """The fill tool: a tap inside a shape floods it with one colour. The flood grows from the tap point (the patch's
-    arc position is the distance from it, so a film reveals it as a wave over a few frames)."""
-    y0, y1, x0, x1 = stroke['box']
-    name, k = stroke['clip']
-    m, ya, xa = label_clip(name, k, (y0, y1, x0, x1))
-    gy, gx = np.nonzero(m > .003)
-    a = m[gy, gx] * stroke.get('opacity', 1.)
-    gy, gx = gy + ya, gx + xa
-    sx, sy = stroke['points'][0]
-    ss = np.hypot(gx - sx, gy - sy)
-    n = len(gy)
-    L = float(stroke.get('flood') or (ss.max() if n else 1.))
-    return dict(box=(y0, y1, x0, x1), gy=gy.astype(np.int32), gx=gx.astype(np.int32), ss=ss.astype(np.float32),
-                alpha=a.astype(np.float32), paint=np.tile(np.asarray(stroke['rgb'], np.float32), (n, 1)),
-                hgt=np.zeros(n, np.float32), L=L, wpx=np.full(n, 3., np.float32),
-                path=np.asarray(stroke['points'], np.float32), s=np.array([0., L], np.float32), layer=stroke.get('layer'))
-
-
 def adjust(stroke, canvas):
     """The last adjustment (the line art tinted toward the colours beside it, a soft glow, the tone curve): the whole
     picture eases to its finished state on a layer above everything, like dragging an adjustment slider."""
@@ -225,7 +206,7 @@ def adjust(stroke, canvas):
 
 
 RENDER = {'graphite': graphite, 'stump': stump, 'eraser': eraser, 'pen': pen, 'cel': cel, 'air': air,
-          'bucket': bucket, 'adjust': adjust}
+          'adjust': adjust}
 
 
 # ----------------------------------------------------------------------------------------------- surfaces
