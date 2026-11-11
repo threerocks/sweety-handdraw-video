@@ -8,6 +8,8 @@ an illustrator paints under the line art with a clipping mask).
 A stroke uses the oil engine's geometry (paint.geometry: centreline, taper, wobble) and its patch format (box, gy,
 gx, ss, alpha, paint, wpx), so film.py reveals it by arc length exactly as it does an oil stroke.
 """
+import math
+
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
@@ -107,54 +109,98 @@ def clipped(stroke, f, a):
     return a * m[f['gy'] - ya, f['gx'] - xa]
 
 
+# graphite: the sheet holds a coverage c in 0..1 (0 bare paper, 1 the densest graphite), read back from its colour. A
+# pencil stroke covers a share d of the paper still showing (so crossing strokes add up), up to what its grade can
+# reach: a 2H never gets as dark as a 6B. d is the pencil's softness times the pressure, which changes along the
+# stroke but not across it; a light touch leaves more of the paper's grain showing.
+GRADES = {'2H': (.34, .46), 'HB': (.52, .66), '2B': (.72, .84), '4B': (.88, .94), '6B': (1., 1.)}   # softness, ceiling
+DARK = np.array([.082, .082, .094])     # the densest graphite
+_LUM = np.array([.299, .587, .114])
+
+
+def coverage(rgb, ground):
+    pv = ground @ _LUM
+    return np.clip((pv - rgb @ _LUM) / (pv - DARK @ _LUM), 0, 1)
+
+
+def tone(c, ground):
+    return ground + (DARK * PAPER_TINT - ground) * c[..., None]
+
+
+def pressure_along(stroke, f):
+    """The hand's pressure at each pixel of the footprint: the planner's profile along the stroke (pp, evenly spaced
+    along its length), a light landing and lift, and a slow tremor."""
+    u = np.clip(f['ss'] / max(f['L'], 1e-6), 0, 1)
+    pp = stroke.get('pp')
+    p = np.interp(u, np.linspace(0, 1, len(pp)), pp) if pp else np.ones(len(u))
+    rng = np.random.default_rng(stroke['seed'] + 5)
+    n = max(3, int(f['L'] / 14) + 2)
+    p = p * (1 + stroke.get('tremor', .1) * np.interp(u, np.linspace(0, 1, n), rng.standard_normal(n)))
+    taper = np.clip(f['wpx'] / stroke['R'], 0, 1) ** 1.5
+    return np.clip(p * stroke.get('pressure', 1.) * taper, 0, 1)
+
+
 def graphite(stroke, canvas):
-    """A pencil line or the side of the lead: darkens toward the lead's own value; light pressure only marks the tops
-    of the paper's tooth, heavy pressure fills the valleys too."""
+    """A pencil stroke: the point (a line of even weight across its width) or the side of the lead (side=True: a
+    broad, soft-flanked, grainy band)."""
     f = footprint(stroke, canvas.shape[:2])
     if f is None:
         return None
-    side = stroke['R'] > 2.6                                   # shading with the side of the lead: soft flanks
-    prof = hard_edge(f, .9) * ((1 - np.clip(f['rr'], 0, 1) ** 2) ** .6 if side else 1.)
-    taper = np.clip(f['wpx'] / stroke['R'], 0, 1) ** .5
-    pr = stroke.get('pressure', .6) * taper
-    t = GRAIN[f['gy'], f['gx']]
-    catch = np.clip((t - (1 - 1.15 * pr)) / .24, 0, 1)
-    a = clipped(stroke, f, prof * catch * stroke.get('opacity', .85))
-    under = canvas[f['gy'], f['gx']]
-    if stroke.get('level'):            # the tone this layer of the drawing builds toward, pixel by pixel
-        lead = LEVELS[stroke['level']][f['gy'], f['gx']]
-    else:
-        lead = stroke['lead'] * PAPER_TINT
-    return patch_of(f, a, np.minimum(under, lead))
+    side = stroke.get('side', False)
+    prof = hard_edge(f, .9) * ((1 - np.clip(f['rr'], 0, 1) ** 2) ** .7 if side else 1.)
+    p = pressure_along(stroke, f)
+    soft, ceil = GRADES[stroke.get('grade', 'HB')]
+    g = GRAIN[f['gy'], f['gx']]
+    grain = np.clip(1 + (.3 if side else .45) * (g - .5) * 2 * (1 - .85 * p), .1, 2.)
+    d = np.clip(soft * p * grain, 0, 1) * clipped(stroke, f, prof)
+    ground = PAPER[f['gy'], f['gx']]
+    c = coverage(canvas[f['gy'], f['gx']], ground)
+    c2 = np.maximum(c, np.minimum(ceil, 1 - (1 - c) * (1 - d)))
+    return patch_of(f, (c2 > c + 1e-4) * np.clip(prof * 4, 0, 1), tone(c2, ground))
 
 
 def stump(stroke, canvas):
-    """A blending stump or tissue: smears the graphite already there into a soft tone (a little of it travels)."""
+    """A blending stump or tissue: smears the graphite already there into a soft tone (lines melt into each other,
+    the paper's grain fills in; a trace travels with the stump)."""
     f = footprint(stroke, canvas.shape[:2])
     if f is None:
         return None
     y0, y1, x0, x1 = f['box']
-    sig = max(1.5, stroke['R'] * .55)
-    pad = int(3 * sig)
+    reach = max(2., stroke['R'] * stroke.get('spread', .5))     # how far graphite is dragged along the stroke
+    pad = int(reach * 2) + 3
     ya, yb, xa, xb = max(0, y0 - pad), min(canvas.shape[0], y1 + pad), max(0, x0 - pad), min(canvas.shape[1], x1 + pad)
-    blur = ndimage.gaussian_filter(canvas[ya:yb, xa:xb], (sig, sig, 0))
-    smeared = blur[f["gy"] - ya, f["gx"] - xa] * .997               # the stump carries a trace of graphite
+    box = ndimage.gaussian_filter(canvas[ya:yb, xa:xb], (.8, .8, 0))
+    # a stump drags graphite the way it moves: the tone is averaged along the stroke far more than across it, so
+    # a rubbed passage keeps soft streaks in the stroke's direction instead of going out of focus
+    tan = np.gradient(f['path'], axis=0)
+    tan /= np.linalg.norm(tan, axis=1, keepdims=True) + 1e-9
+    u = np.clip(f['ss'], 0, f['L'])
+    tx, ty = np.interp(u, f['s'], tan[:, 0]), np.interp(u, f['s'], tan[:, 1])
+    smeared = np.zeros((len(u), 3))
+    wsum = 0.
+    for o in np.linspace(-2, 2, 9):
+        w = math.exp(-.5 * o * o)
+        yy = np.clip(f['gy'] + ty * o * reach - ya, 0, yb - ya - 1)
+        xx = np.clip(f['gx'] + tx * o * reach - xa, 0, xb - xa - 1)
+        for c in range(3):
+            smeared[:, c] += w * ndimage.map_coordinates(box[..., c], [yy, xx], order=1)
+        wsum += w
+    smeared = smeared / wsum * .997
     prof = np.clip(1 - f['rr'] ** 2, 0, 1) ** .8
     a = clipped(stroke, f, prof * stroke.get('opacity', .7))
-    return patch_of(f, a, np.minimum(smeared, canvas[f['gy'], f['gx']] * 1.04))
+    return patch_of(f, a, smeared)
 
 
 def eraser(stroke, canvas):
-    """A kneaded eraser dab or an eraser pen: lifts graphite toward the bare paper."""
+    """An eraser pen (hard, narrow) or a kneaded eraser (soft): lifts a share of the graphite under it, by pressure."""
     f = footprint(stroke, canvas.shape[:2])
     if f is None:
         return None
-    prof = hard_edge(f, 1.4) if stroke['R'] < 3 else np.clip(1 - f['rr'] ** 3, 0, 1)
-    a = clipped(stroke, f, prof * stroke.get('opacity', .6))
-    under = canvas[f['gy'], f['gx']]
-    if stroke.get('level'):            # lift only as far as the drawing's own light there
-        return patch_of(f, a, np.maximum(under, LEVELS[stroke['level']][f['gy'], f['gx']]))
-    return patch_of(f, a, PAPER[f['gy'], f['gx']])
+    prof = hard_edge(f, 1.2) if stroke['R'] < 3.2 else np.clip(1 - f['rr'] ** 2.5, 0, 1)
+    e = np.clip(pressure_along(stroke, f) * stroke.get('opacity', .6), 0, 1) * clipped(stroke, f, prof)
+    ground = PAPER[f['gy'], f['gx']]
+    c = coverage(canvas[f['gy'], f['gx']], ground)
+    return patch_of(f, (e > .01) * np.clip(prof * 4, 0, 1), tone(c * (1 - e), ground))
 
 
 def colour_of(stroke, f):
