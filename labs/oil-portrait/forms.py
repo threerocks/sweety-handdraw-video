@@ -44,10 +44,10 @@ def smooth_areas(ref=None):
         L = rgb2lab(ndimage.gaussian_filter(ref, (1.5, 1.5, 0)))[..., 0]
         lh, ls = np.median(L[AREAS['hair']]), np.median(L[AREAS['skin']])
         if abs(lh - ls) > 14:
-            hairlike = np.abs(L - lh) < np.abs(L - ls) * .8
-            skinlike = np.abs(L - ls) < np.abs(L - lh) * .8
+            hairlike = np.abs(L - lh) < np.abs(L - ls)
+            skinlike = ~hairlike
             feats = AREAS.get('features', np.zeros((H, W), bool))
-            band = ndimage.binary_dilation(AREAS['hair'], iterations=12) & ndimage.binary_dilation(AREAS['skin'], iterations=12) & ~feats
+            band = ndimage.binary_dilation(AREAS['hair'], iterations=16) & ndimage.binary_dilation(AREAS['skin'], iterations=16) & ~feats
             to_hair = band & AREAS['skin'] & hairlike
             to_skin = band & AREAS['hair'] & skinlike
             # only what stays attached to its new area (a dark nostril near the fringe is not hair)
@@ -162,7 +162,7 @@ def quantise(lab, mask, R, k, rng, fill=False, split=7.):
     return pid, np.array(mixes, int), centres / wv
 
 
-def stroke_of(pts, R, colour_lab, mix, mix_lab, rng, medium, soft=0., light=False, cut=False):
+def stroke_of(pts, R, colour_lab, mix, mix_lab, rng, medium, soft=0., light=False, cut=False, body=1.):
     """One brush stroke with its own touch: pressure, load, breathing width, sometimes two tones on the brush."""
     touch = float(np.clip(rng.lognormal(0, .25), .65, 1.45))
     lab = np.array(colour_lab, float) + rng.normal(0, 1., 3) * np.array([.9, .7, .7]) * (1. if R > 12 else .4)
@@ -171,7 +171,7 @@ def stroke_of(pts, R, colour_lab, mix, mix_lab, rng, medium, soft=0., light=Fals
               seed=int(rng.integers(1 << 30)), load=float(rng.uniform(.75, 1.3)),
               press=(float(rng.uniform(.5, .9)), float(rng.uniform(.25, .7))), press_fixed=True,
               soft=float(np.clip(soft + rng.uniform(-.08, .12), 0, 1)), pvar=.11, wobble=.9 if R > 8 else .6,
-              body=float((.4 + .35 * touch) * min(1., R / 14.) ** .5))
+              body=float((.4 + .35 * touch) * min(1., R / 14.) ** .5 * body))
     if cut:                                               # along an outline: a steady, well loaded stroke
         st.update(press=(.92, .85), wobble=.5, pvar=.04, load=1.6, body=.3)
     elif light:                                           # a light drag over wet paint
@@ -183,7 +183,7 @@ def stroke_of(pts, R, colour_lab, mix, mix_lab, rng, medium, soft=0., light=Fals
 
 
 def fill_strokes(pm, box, R, tx, ty, lab, rng, cov, area, reach=(2.5, 6.), rho=1.25, medium='bristle', soft=0., mix=0,
-                 mix_lab=None, brk=11., tip=None):
+                 mix_lab=None, brk=11., tip=None, body=1.):
     """Cover one plane (bool mask pm, bbox box) with strokes along the flow, laid side by side across it. A stroke may
     run on past the plane while the colour under it stays its own (a brush does not stop at a contour line of the
     model), inside the area; cov (the whole area's coverage so far) keeps later planes from repainting it."""
@@ -286,7 +286,7 @@ def fill_strokes(pm, box, R, tx, ty, lab, rng, cov, area, reach=(2.5, 6.), rho=1
         keep = np.r_[0, np.arange(2, len(g) - 1, 2), len(g) - 1] if len(g) > 4 else np.arange(len(g))
         if len(g) > 4:                                     # a pull of the arm is smooth: no tremor from the flow field
             g = np.vstack([g[:1], ndimage.uniform_filter1d(g, 5, axis=0, mode='nearest')[1:-1], g[-1:]])
-        out.append(stroke_of(g[keep], R, col, mix, mix_lab if mix_lab is not None else col, rng, medium, soft))
+        out.append(stroke_of(g[keep], R, col, mix, mix_lab if mix_lab is not None else col, rng, medium, soft, body=body))
         cov[yi, xi] = True
         tip = g[0] if np.hypot(*(g[0] - tip)) > np.hypot(*(g[-1] - tip)) else g[-1]   # it is pulled from the nearer end
     return out
@@ -294,13 +294,22 @@ def fill_strokes(pm, box, R, tx, ty, lab, rng, cov, area, reach=(2.5, 6.), rho=1
 
 def form_strokes(ref, canvas, height, thick, tooth, area, mask, R, k, rng, T=0., start_tip=(0, 0), soft=0., medium='bristle',
                  reach=(2.5, 6.), cutin=True, drags=True, contours=None, deep=None, max_len=None, spacing=None, axis=False,
-                 brk=11., dark=.15):
+                 brk=11., dark=.15, body=1.):
     """Paint an area form by form, rendering as it goes (each plane closes its own bare specks before the next). Returns
     the strokes in painting order. T > 0: a correcting pass (only where the canvas is still off by more than T)."""
     lab = rgb2lab(ndimage.gaussian_filter(ref, (R * .3, R * .3, 0)))
     if mask.sum() < 50:
         return []
     lab_fine = rgb2lab(ndimage.gaussian_filter(ref, (1.5, 1.5, 0)))
+    if not T:
+        # the rim of an area is laid in the colour just inside it: in the (blurred) target the last few pixels before
+        # the outline are already half the neighbour's colour, which painted a darker band round a cheek (an outline)
+        inner = ndimage.binary_erosion(mask, iterations=max(2, int(R * .45)))
+        if inner.any():
+            _, (iy, ix) = ndimage.distance_transform_edt(~inner, return_indices=True)
+            rim = mask & ~inner
+            lab[rim] = lab[iy[rim], ix[rim]]
+            lab_fine[rim] = lab_fine[iy[rim], ix[rim]]
     tx, ty = orientation(lab[..., 0], R, rng)
     pid, mixes, centres = quantise(lab, mask, R, k, rng)
     n = len(mixes)
@@ -391,13 +400,13 @@ def form_strokes(ref, canvas, height, thick, tooth, area, mask, R, k, rng, T=0.,
                     seg = path[sel]
                     gi = np.clip(np.rint(seg).astype(int), 0, [W - 1, H - 1])
                     ci = np.clip(np.rint(seg + (seg - path0[sel]) * 1.2).astype(int), 0, [W - 1, H - 1])
-                    col = .6 * mix_lab + .4 * np.median(lab_fine[ci[:, 1], ci[:, 0]], 0)
+                    col = np.median(lab_fine[ci[:, 1], ci[:, 0]], 0)
                     if not T or np.linalg.norm(lab[gi[:, 1], gi[:, 0]] - can_lab[gi[:, 1], gi[:, 0]], axis=1).mean() >= T:
                         keep = np.r_[0, np.arange(3, len(seg) - 1, 3), len(seg) - 1]
                         mine.append(dict(stroke_of(seg[keep], min(rcut, Rp), col, mix, mix_lab, rng, medium, soft, cut=True), cutin=1))
                 a = b
         # 2. the inside, side by side along the form
-        fill = fill_strokes(pm, box, Rp, tx, ty, lab, rng, cov, reachable, reach=reach, brk=brk, tip=tip, medium=medium, soft=soft, mix=mix, mix_lab=mix_lab,
+        fill = fill_strokes(pm, box, Rp, tx, ty, lab, rng, cov, reachable, reach=reach, brk=brk, tip=tip, body=body, medium=medium, soft=soft, mix=mix, mix_lab=mix_lab,
                             rho=spacing or 1.25)
         if max_len:                                        # presets with short strokes (tiles, knife)
             short = []
@@ -577,32 +586,132 @@ def join_lines(strokes, gap=14., angle=40.):
     return out
 
 
+def edge_strokes(ref, chains, rng, r=5.):
+    """Restate the lit edge of the face against the hair: after the hair and its strands are in, the light is cut back
+    into the dark in long steady strokes along the outline (the strand ends leave it scalloped). Only where the two
+    sides differ clearly in value; where the face turns into shadow the edge stays lost."""
+    lab = rgb2lab(ndimage.gaussian_filter(ref, (1.5, 1.5, 0)))
+    inner = ndimage.binary_erosion(AREAS['skin'], iterations=7)
+    _, (iy, ix) = ndimage.distance_transform_edt(~inner, return_indices=True)
+    out = []
+    for p, nrm in chains:
+        o = np.clip(np.rint(p - nrm * 6).astype(int), 0, [W - 1, H - 1])
+        i = np.clip(np.rint(p + nrm * 7).astype(int), 0, [W - 1, H - 1])
+        ok = AREAS['hair'][o[:, 1], o[:, 0]] & (lab[i[:, 1], i[:, 0], 0] - lab[o[:, 1], o[:, 0], 0] > 18)
+        ok = ndimage.binary_opening(ndimage.binary_closing(ok, np.ones(15, bool)), np.ones(25, bool))
+        lbl, m = ndimage.label(ok)
+        for k in range(1, m + 1):
+            idx = np.flatnonzero(lbl == k)
+            path = p[idx] + nrm[idx] * r * .75
+            arc = np.r_[0, np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
+            a = 0.
+            while a < arc[-1] - 4:
+                b = min(arc[-1], a + rng.uniform(90, 170))
+                if arc[-1] - b < 40:
+                    b = arc[-1]
+                sel = np.flatnonzero((arc >= a - 8) & (arc <= b))
+                a = b
+                if len(sel) < 6:
+                    continue
+                seg = path[sel]
+                gi = np.clip(np.rint(seg).astype(int), 0, [W - 1, H - 1])
+                col = np.median(lab[iy[gi[:, 1], gi[:, 0]], ix[gi[:, 1], gi[:, 0]]], 0)
+                rgb = [float(x) for x in lab2rgb(col)]
+                keep = np.r_[0, np.arange(4, len(seg) - 1, 4), len(seg) - 1]
+                out.append(dict(points=[(float(x), float(y)) for x, y in seg[keep]], R=float(r), rgb=rgb, mix=0, mix_rgb=rgb,
+                                medium='bristle_soft', seed=int(rng.integers(1 << 30)), load=2., press=(.85, .7), soft=.45,
+                                pvar=.05, wobble=.4, body=.35, clip='skin'))
+    return out
+
+
+def light_strokes(ref, canvas, rng, n=5):
+    """提亮: the last touches. The lightest shapes of the face (forehead, cheek, the bridge and tip of the nose) each as
+    one loaded stroke laid thick along the shape, and the highlight of the lip: few, decisive, not blended."""
+    lab = rgb2lab(ndimage.gaussian_filter(ref, (2., 2., 0)))
+    L = lab[..., 0]
+    out = []
+    feats = AREAS['features']
+    eyes_m = np.zeros((H, W), bool)
+    for k in EYE_FEATURES:
+        eyes_m |= ellipse_mask(FEATURES[k], 1.5)
+
+    def strokes_in(region, pct, count, rmax, rmin=2.2, min_px=40):
+        if region.sum() < 200:
+            return
+        hi = region & (L > np.percentile(L[region], pct))
+        hi = ndimage.binary_opening(hi, iterations=1)
+        comp, m = ndimage.label(hi)
+        if not m:
+            return
+        sizes = ndimage.sum_labels(np.ones((H, W)), comp, index=np.arange(1, m + 1))
+        gain = ndimage.mean(L, comp, index=np.arange(1, m + 1)) - np.percentile(L[region], 50)
+        for c in np.argsort(-sizes * np.clip(gain, 0, None))[:count]:
+            if sizes[c] < min_px:
+                continue
+            ys, xs = np.nonzero(comp == c + 1)
+            P = np.c_[xs, ys].astype(float)
+            cen = P.mean(0)
+            ev, evec = np.linalg.eigh(np.cov((P - cen).T) + np.eye(2) * 1e-6)
+            u = evec[:, -1]
+            if u @ np.array([.75, .66]) < 0:
+                u = -u
+            half = min(2. * math.sqrt(ev[-1]), 70.)
+            R = float(np.clip(1.5 * math.sqrt(ev[0]), rmin, rmax))
+            half = max(half, 2.2 * R)                      # a pull of the brush, not a blob
+            bend = rng.normal(0, .08) * half
+            v = np.array([-u[1], u[0]])
+            pts = [cen - u * half * .9, cen + v * bend, cen + u * half * .9]
+            col = np.median(lab[ys, xs], 0) + [1., 0., .5]
+            rgb = [float(x) for x in lab2rgb(col)]
+            out.append(dict(points=[(float(a), float(b)) for a, b in pts], R=R, rgb=rgb, mix=900 + len(out), mix_rgb=rgb,
+                            medium='bristle_soft', seed=int(rng.integers(1 << 30)), load=2.5, press=(.8, .45), soft=.15, pvar=.08,
+                            wobble=.5, body=float(2.2 * (12. / max(R, 4.)) ** .5), focal=True))
+
+    skin = AREAS['face'] & ndimage.binary_erosion(AREAS['skin'], iterations=6) & ~ndimage.binary_dilation(feats, iterations=3)
+    strokes_in(skin, 95.5, n, 9., rmin=3.5, min_px=120)
+    for k, e in enumerate(FEATURES):                       # the nose tip, the lower lip
+        if k in EYE_FEATURES:
+            continue
+        strokes_in(ellipse_mask(e, 1.) & AREAS['skin'] & ~eyes_m, 96, 1, 4.5, min_px=12)
+    out.sort(key=lambda st: (st['points'][0][1], st['points'][0][0]))
+    return out
+
+
 # area by area, as the painter in the reference video: (name, label, kind, args, video budget in seconds)
 STEPS_V5 = [
     ('face', '脸部块面', 'forms', dict(area='skin', R=26, k=6, reach=(2.5, 5.5)), 11.),
-    ('face2', '脸部块面', 'forms', dict(area='skin', R=10, k=16, T=4.5, reach=(2., 5.), drags=False, brk=6., medium='bristle_flat'), 5.),
-    ('hair', '头发', 'forms', dict(area='hair', R=19, k=2, reach=(5., 12.), brk=14., dark=.12, spacing=1.1), 13.),
-    ('strands', '头发', 'layer', v2_spec('texture', only=None, exclude=[], area='hair', cover=1.9, R=4.2), 10.),
+    # the correcting passes on skin: few, broad, soft-edged and thin, so the block-in's calm planes stand where they are
+    # already right (many small crisp dabs gave the cheeks a scaly, pilled surface)
+    ('face2', '脸部块面', 'forms', dict(area='skin', R=15, k=10, T=7., reach=(2., 4.5), drags=False, brk=8., medium='bristle_soft',
+                                    soft=.55, body=.45), 3.),
+    ('soften', '脸部块面', 'blend', dict(R=10., patch_min=1.5), 2.),
+    ('hair', '头发', 'forms', dict(area='hair', R=19, k=2, reach=(5., 12.), brk=14., dark=.12, spacing=1.1), 12.),
+    ('strands', '头发', 'layer', v2_spec('texture', only=None, exclude=[], area='hair', cover=1.9, R=4.2), 9.),
     ('detail', '五官', 'layer', v2_spec('detail', area='features', skin=False), 3.),
-    ('clothes', '衣服', 'forms', dict(area='clothes', R=22, k=7, reach=(4., 9.), dark=.3), 6.),
+    ('clothes', '衣服', 'forms', dict(area='clothes', R=22, k=7, reach=(4., 9.), dark=.3), 5.),
     ('clothes2', '衣服', 'forms', dict(area='clothes', R=8, k=12, T=6, reach=(3., 8.), drags=False), 3.),
     ('clothes3', '衣服', 'layer', v2_spec('detail', area='clothes', focal=False, skin=False, T=9, gamma=0.), 3.),
-    ('background', '背景', 'forms', dict(area='bg', R=32, k=6, reach=(3., 7.), dark=.25), 9.),
-    ('background2', '背景', 'forms', dict(area='bg', R=13, k=9, T=6, reach=(2.5, 6.), drags=False), 3.),
+    ('background', '背景', 'forms', dict(area='bg', R=32, k=6, reach=(3., 7.), dark=.25, body=.5), 8.),
+    ('background2', '背景', 'forms', dict(area='bg', R=13, k=9, T=6, reach=(2.5, 6.), drags=False, body=.5), 3.),
     ('edges', '收边', 'layer', v2_spec('texture', only=None, exclude=[], area='outline', own=1., mixes=24, T=6, gamma=0.,
                                       R=3.4, cover=1.1), 5.),
+    ('trueedge', '收边', 'trueedge', {}, 2.),
     ('sheen', '提亮', 'layer', v2_spec('texture', only=None, exclude=[], area='hair', lighten=3., T=6.5, R=3.2, mixes=8, own=.9,
                                       cover=2.2, press=(.3, .1)), 4.),
-    ('face3', '深入', 'forms', dict(area='face', R=5.5, k=20, T=4.5, reach=(2., 5.), drags=False, cutin=False, brk=5.,
-                                  medium='bristle_flat'), 4.),
+    ('face3', '深入', 'forms', dict(area='face', R=8., k=14, T=7., reach=(2., 4.5), drags=False, cutin=False, brk=7.,
+                                  medium='bristle_soft', soft=.6, body=.4), 2.),
     ('polish', '深入', 'layer', v2_spec('polish', area='features', skin=False, feather_after=False), 3.),
     ('scumble', '干擦', 'layer', v2_spec('scumble'), 2.),
     ('accent', '深入', 'layer', v2_spec('accent', area='features'), 2.),
+    # the eyes once more with the smallest brush: thin strokes along the lids and the rim of the iris, so the earlier
+    # broader touches stop reading as a ring drawn round the eye
+    ('eyefine', '深入', 'layer', v2_spec('polish', area='eyes', R=1.5, T=4.5, maxlen=14, minlen=3, fc=.8, mixes=12, own=1.,
+                                        blur=.3, soft=.1, skin=False, feather_after=False, gamma=0., press=(.6, .3)), 3.),
 ]
-PACE_V5 = dict(feature_cap=3.5, eye_life={'polish': 5., 'lines': 4.5})
+PACE_V5 = dict(feature_cap=2.8, eye_life={'polish': 3.5, 'lines': 3.5})
 # passes of many fine strokes laid side by side: filmed as continuous motions of the hand (it stays on the canvas and the
 # strokes appear as it passes), not as hundreds of separate dabs sharing a frame
-GLIDE = {'strands', 'sheen', 'edges', 'face3', 'clothes3'}
+GLIDE = {'strands', 'sheen', 'edges', 'face3', 'clothes3', 'eyefine'}
 PRESET = 'planes'
 
 
@@ -628,6 +737,9 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
             EYE_FEATURES.add(min(around, key=lambda k: FEATURES[k][2] * FEATURES[k][3]))
     area_masks(ref, rng)
     smooth_areas(ref)
+    AREAS['eyes'] = np.zeros((H, W), bool)
+    for k in EYE_FEATURES:
+        AREAS['eyes'] |= ellipse_mask(FEATURES[k], 1.35)
     vis = np.zeros((H, W, 3))
     for name, colour in (('bg', (.85, .85, .85)), ('clothes', (.3, .4, .8)), ('hair', (.35, .2, .1)), ('skin', (.95, .7, .55))):
         vis[AREAS[name]] = colour
@@ -667,15 +779,26 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
         lines = join_lines(sketch)
         print(f'underdrawing: {len(sketch)} fragments -> {len(lines)} lines', flush=True)
         run('sketch', '起稿', lines, 5.)
+    pencil = (canvas.mean(-1) < GROUND.mean() - .08) if sketch else None
     tip = (W * .5, H * .3)
     pre = dict(PRESETS[PRESET])
     for name, label, kind, args, budget in STEPS_V5:
         if name == 'scumble' and 'texture' not in REGIONS:
             continue
+        if kind == 'trueedge':
+            strokes = edge_strokes(ref, contours.get('skin', []), rng)
+            if strokes:
+                tip = run(name, label, strokes, budget) or tip
+            continue
+        if kind == 'blend':                                # a clean soft brush pulls neighbouring planes into each other
+            region = AREAS['face'] & ~ndimage.binary_dilation(AREAS['features'], iterations=4) & ndimage.binary_erosion(AREAS['skin'], iterations=8)
+            strokes = paint.blend_strokes(ref, canvas, focus, rng, start_tip=tip, region=region, **args)
+            tip = run(name, label, strokes, budget) or tip
+            continue
         if kind == 'forms':
             a = dict(args)
             a['R'] = a['R'] * pre.get('R', 1.)
-            for key in ('medium', 'soft', 'max_len', 'spacing', 'axis'):
+            for key in ('medium', 'soft', 'max_len', 'axis'):
                 if key in pre:
                     a[key] = pre[key] if key != 'medium' or pre[key] != 'flat' else 'bristle'
             if 'spacing' in pre:                           # presets give spacing in v4 units (1.45 = the v4 default)
@@ -705,6 +828,10 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
         first = []
         if name == 'edges':                                # before the edges are worked: no ground left anywhere
             holes = bare_holes(np.ones((H, W), bool), thick, min_px=6)
+            if pencil is not None:                         # a pencil line still showing through thin paint
+                off = np.linalg.norm(rgb2lab(canvas) - rgb2lab(ref), axis=-1) > 7
+                dark = (canvas.mean(-1) < ref.mean(-1) - .035) & (ref.mean(-1) > .45)
+                holes |= ndimage.binary_dilation(pencil & off & dark, iterations=1)
             if holes.sum() > 20:
                 first = planes.plane_strokes(ref, canvas, holes, R=5., k=3, rng=rng, start_tip=tip, medium='bristle',
                                              spacing=1.1, fill=True)
@@ -718,15 +845,31 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
         for st in strokes[len(first):]:
             render(st, canvas, height, thick, tooth)
         tip = record(name, label, strokes, budget) or tip
-        if name == 'accent':
+        if name == 'eyefine':
             if sketch:
                 raw = line_strokes(sketch, ref, rng)
+                keep = []
+                can = rgb2lab(canvas)
+                for st in raw:
+                    if st.get('cut'):                      # cutting in beside a line only where the paint there is off:
+                        gi = np.clip(np.rint(np.array(st['points'])).astype(int), 0, [W - 1, H - 1])   # a ring of cut-ins
+                        if np.linalg.norm(can[gi[:, 1], gi[:, 0]] - rgb2lab(np.array(st['rgb'])[None])[0], axis=1).mean() < 7:   # reads as a second outline
+                            continue
+                        st.update(medium='oil_skin', soft=.8, R=1.3)
+                    else:                                  # a lid or lash line is one thin confident pull
+                        st['R'] = float(np.clip(st['R'] * .8, .9, 1.5))
+                        st['press'] = (.75, .35)
+                    keep.append(st)
+                raw = keep
                 cuts = painter_order([st for st in raw if st.get('cut')], np.zeros(1), tip, rng)
                 lines = painter_order([st for st in raw if not st.get('cut')], np.zeros(1), cuts[-1]['points'][-1] if cuts else tip, rng)
                 for st in cuts + lines:
                     st['mix'] = 0
                     tag_feature(st)
                 tip = run('lines', '勾勒', cuts + lines, 0.) or tip
+            lights = light_strokes(ref, canvas, rng)
+            if lights:
+                tip = run('lights', '亮部', lights, 0.) or tip
             if eyes:
                 touches = eye_touches(ref, eyes, rng)
                 for st in touches:
