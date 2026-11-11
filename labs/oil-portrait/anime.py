@@ -13,6 +13,12 @@ late, in a close-up: iris shading, the lid's shadow, catchlights on top -> 调�
 Every pixel of colour appears under the nib as it passes: a stroke either is the shape (a line, a streak, a dab),
 follows the shape's edge, or colours in a shape whose edge is already there. No fills, nothing appears on its own.
 
+Flats go on in layers: an area's main colour over the whole of it first (the background straight across where the
+leaves will be, the skin under the lips, the eye's white under the iris), then what sits on it as its own shapes. An
+area laps two pixels into the areas painted after it, and the pen goes once round whatever the brush left thin, so no
+paper shows inside an area or along its border once it is done; bare.py counts what is left (printed after each
+pass: it should be zero).
+
 The illustration is taken apart into what an illustrator paints in each step: its line art (thin dark marks, found
 with a black-hat filter, plus a clean line drawing of the outlines), the colours under the lines (the lines filled
 in from their sides), and in each area (skin, hair, eyes, clothes, background) its materials (a coarse colour
@@ -31,6 +37,7 @@ import numpy as np
 from PIL import Image
 from scipy import ndimage
 
+import bare
 import paint
 import media
 import planes
@@ -309,6 +316,16 @@ def take_apart(C0, areas, rng):
                                        n=n, rgb=rgb, base=bid, lab='shade', pt=(int(xs[0] + sl[1].start), int(ys[0] + sl[0].start))))
     stray = flat_lab == 0                     # specks too small to be a shape belong to the shape beside them
     if stray.any():
+        for area in CLUSTERS:                 # within its own area: a speck of background never becomes hair
+            mine = stray & areas[area]
+            have = (flat_lab > 0) & areas[area] & ~stray
+            if not mine.any() or not have.any():
+                continue
+            _, (iy, ix) = ndimage.distance_transform_edt(~have, return_indices=True)
+            flat_lab[mine] = flat_lab[iy, ix][mine]
+            F1[mine] = F1[iy, ix][mine]
+            F2[mine] = F2[iy, ix][mine]
+        stray = flat_lab == 0
         _, (iy, ix) = ndimage.distance_transform_edt(stray, return_indices=True)
         flat_lab[stray] = flat_lab[iy, ix][stray]
         F1[stray] = F1[iy, ix][stray]
@@ -478,25 +495,64 @@ def cover_paths(m, R, tip, angle=None, bow=0., max_rows=None, top_first=False, g
 
 
 def paint_shape(sh, labmap, rng, tip, *, free=None, edge=True, angle=None, bow=0., max_R=64., wide=.65, max_rows=None,
-                top_first=False, extra=None):
+                top_first=False, rim=True, extra=None):
     """One shape, coloured in with the pen in one or two motions, every pixel under the nib: a thin one (or a long
     narrow lock) as one stroke along its middle, a dab if tiny; otherwise, for a shape big enough to need it, a
     careful stroke along its edge just inside it (free: only where the edge is not the edge of the base it is clipped
-    to), then the back-and-forth of cover_paths across the inside."""
+    to), then the back-and-forth of cover_paths across the inside. Then the pen goes once round whatever the brush
+    left thin or bare (a rim, a notch between two locks), so that no paper is left showing in the shape."""
     extra = extra or {}
     m, ya, xa = crop(labmap, sh)
     if m.sum() < 4:
         return []
     off = np.array([xa, ya], float)
-    clip = [sh['lab'], sh['id']]
+    clip = [sh['lab'], sh['id']] + ([sh['grow']] if sh.get('grow') else [])
     rgb = sh['rgb']
     d = ndimage.distance_transform_edt(np.pad(m, 1))[1:-1, 1:-1] if m.all() else ndimage.distance_transform_edt(m)
     maxd = float(d.max())
     out = []
+    cover = np.zeros(m.shape, np.float32)
     tip_l = np.asarray(tip, float) - off
 
     def add(points, R, **kw):
-        out.append(lay(stroke(np.asarray(points, float) + off, R, 'cel', rng, rgb=rgb, clip=clip, **{**extra, **kw})))
+        st = stroke(np.asarray(points, float) + off, R, 'cel', rng, rgb=rgb, clip=clip, **{**extra, **kw})
+        p = SURF.render(st)
+        if p is None or not len(p['gy']):
+            return
+        SURF.commit(p)
+        gy, gx = p['gy'] - ya, p['gx'] - xa
+        ok = (gy >= 0) & (gy < m.shape[0]) & (gx >= 0) & (gx < m.shape[1])
+        np.maximum.at(cover, (gy[ok], gx[ok]), p['alpha'][ok])
+        out.append(st)
+
+    def tidy():
+        """Close what is still thin or bare: one small-brush motion through every such spot, nearest first."""
+        nonlocal tip_l
+        for rnd in range(6 if rim else 0):     # a cel shade lies on its flat: a thin rim there is not bare paper
+            left = m & (cover < .97)
+            if not left.any():
+                return
+            comp, n = ndimage.label(left, np.ones((3, 3)))
+            deep = float(ndimage.distance_transform_edt(np.pad(left, 1)).max())
+            R = float(np.clip(deep + 1.6 + 1.5 * rnd, 2.4, max(2.4, maxd + 2)))
+            bits = []
+            for k, sl in enumerate(ndimage.find_objects(comp)):
+                cy, cx = np.nonzero(comp[sl] == k + 1)
+                P = np.c_[cx + sl[1].start, cy + sl[0].start].astype(float)
+                if len(P) < 3:
+                    bits.append(np.vstack([P[0], P[-1] + [.5, 0]]))
+                    continue
+                if len(P) >= 30:                 # a bent sliver: along its middle, not straight across its bend
+                    mid = [q + [sl[1].start, sl[0].start] for q in traced(comp[sl] == k + 1) if length(q) >= 3]
+                    if mid:
+                        bits += [thin(q, max(4., 2 * R)) for q in mid]
+                        continue
+                ax = np.linalg.eigh(np.cov(P.T) + np.eye(2) * 1e-6)[1][:, -1]
+                order = np.argsort((P - P.mean(0)) @ ax)
+                bits.append(P[order[np.linspace(0, len(P) - 1, max(2, int(len(P) / max(4., 2 * R)) + 2)).astype(int)]])
+            p = joined(bits, tip_l)
+            add(p, R, press=(.9, .85), role='tidy')
+            tip_l = p[-1]
 
     streak = maxd <= 2 * THIN and sh['n'] > 14 * maxd * maxd      # long and narrow (a lock of hair): one pressed stroke
     if maxd <= THIN or streak:
@@ -506,11 +562,13 @@ def paint_shape(sh, labmap, rng, tip, *, free=None, edge=True, angle=None, bow=0
             r = math.sqrt(sh['n'] / math.pi)
             c = np.array([xs.mean(), ys.mean()])
             add([c - [r * .3, 0], c + [r * .3, 0]], r + 1.2, press=(.8, .7), role='dab')
-            return out
-        p = joined(paths, tip_l)
-        pi = np.clip(np.rint(p).astype(int), 0, [m.shape[1] - 1, m.shape[0] - 1])
-        R = float(np.percentile(d[pi[:, 1], pi[:, 0]], 90)) + 1.6
-        add(thin(p, max(4., 2 * R)), R, press=(.45, .35), pvar=.08, role='streak')
+        else:
+            p = joined(paths, tip_l)
+            pi = np.clip(np.rint(p).astype(int), 0, [m.shape[1] - 1, m.shape[0] - 1])
+            R = float(np.percentile(d[pi[:, 1], pi[:, 0]], 90)) + 1.6
+            add(thin(p, max(4., 2 * R)), R, press=(.45, .35), pvar=.08, role='streak')
+            tip_l = p[-1]
+        tidy()
         return out
     Rf = float(np.clip(maxd * wide, 3., max_R))                       # the brush that fills
     if edge and sh['n'] >= 1500:
@@ -526,6 +584,7 @@ def paint_shape(sh, labmap, rng, tip, *, free=None, edge=True, angle=None, bow=0
             p = np.vstack([p, p + [.6, 0]])
         add(p, Rf, press=(.9, .85), wobble=1, pvar=.04, role='fill')
         tip_l = p[-1]
+    tidy()
     return out
 
 
@@ -697,6 +756,24 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
             EYE_FEATURES.add(min(around, key=lambda k: FEATURES[k][2] * FEATURES[k][3]))
     planes.area_masks_from_map(areas_path, A, rng)
     areas = {n: AREAS[n].copy() for n in ('skin', 'hair', 'clothes', 'bg', 'person')}
+    # a scrap of one area stranded inside another (a few pixels of 'clothes' in the hair, where the area map and the
+    # illustration disagree) belongs to what surrounds it: it would be painted as a stray blob of the wrong colour
+    names4 = ('skin', 'hair', 'clothes', 'bg')
+    lab4 = np.zeros((H, W), int)
+    for k, n in enumerate(names4):
+        lab4[areas[n]] = k + 1
+    scrap = lab4 == 0
+    for k in range(1, 5):
+        comp, n = ndimage.label(lab4 == k)
+        if n:
+            sizes = ndimage.sum_labels(np.ones((H, W)), comp, index=np.arange(1, n + 1))
+            scrap |= np.isin(comp, np.flatnonzero(sizes < 600) + 1)
+    if scrap.any():
+        _, (iy, ix) = ndimage.distance_transform_edt(scrap, return_indices=True)
+        lab4 = lab4[iy, ix]
+        for k, n in enumerate(names4):
+            areas[n] = lab4 == k + 1
+        areas['person'] = ~areas['bg']
     la_own = line_art(A)
     la, la_own = with_clean_lines(A, la_own, lineart_path, areas, eyes) if lineart_path else (la_own, la_own)
     C0 = under_lines(A, la_own)                   # the colours under the illustration's own lines
@@ -708,7 +785,13 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
     look, linec = line_look(A, C0, la, la_own)                     # what it lays: the illustration's own line look
     media.LEVELS.update(A=A, C0=C0, linec=linec)
     media.ALPHAS.update(line=look)
-    media.LABELS.update(flat=flat_lab, shade=shade_lab)
+    area_lab = np.zeros((H, W), np.int32)       # each pixel's area, numbered in painting order (media.label_clip grow)
+    for k, area in enumerate(ORDER):
+        area_lab[areas[area]] = k + 1
+    if (area_lab == 0).any():
+        _, (iy, ix) = ndimage.distance_transform_edt(area_lab == 0, return_indices=True)
+        area_lab = area_lab[iy, ix]
+    media.LABELS.update(flat=flat_lab, shade=shade_lab, area=area_lab)
     for k, v in media.LEVELS.items():
         np.save(out / f'level-{k}.npy', v.astype(np.float16))
     np.save(out / 'alpha-line.npy', look.astype(np.float16))
@@ -744,7 +827,9 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
         roles = {}
         for st in strokes:
             roles[st.get('role', '-')] = roles.get(st.get('role', '-'), 0) + 1
-        print(f'{name:10s} {len(strokes):5d} strokes {roles}  err {err:.4f}  {time.time() - started:6.1f}s', flush=True)
+        w, l, s, _ = bare.count(img, A, F1, F2, C0)
+        left = f'  paper left: white {w} light {l} slits {s}' if name not in ('rough', 'lines') else ''
+        print(f'{name:10s} {len(strokes):5d} strokes {roles}  err {err:.4f}{left}  {time.time() - started:6.1f}s', flush=True)
 
     tip = lambda: np.asarray(state['tip'], float)
     # 草稿: construction, then the rough itself, quick and light, on its own layer
@@ -764,12 +849,26 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
     FILL = {'skin': dict(angle=.12, bow=.05), 'hair': dict(angle=math.pi / 2, max_rows=3, top_first=True, edge=False), 'eyes': {}, 'clothes': {}, 'bg': dict(angle=math.pi / 2, edge=False)}
 
     def lay_flats(area, **extra):
-        regs = sorted((f for f in flats if f['area'] == area), key=lambda f: -f['n'])
-        big = regs[:1]                         # the area's main shape, then its neighbours, nearest first
-        rest = [f for (f,) in nearest_order([(f,) for f in regs[1:]], cen(big[0]) if big else tip(), key=lambda t: cen(t[0]))]
-        out_ = []
-        for f in big + rest:
-            add = paint_shape(f, flat_lab, rng, tip(), extra=extra, **FILL[area])
+        """An area in layers: its main colour over the whole of it first (straight across where anything else will
+        sit: no shape is left blank for later), then what lies on it (lips on the skin, iris and pupil on the eye's
+        white, the collar on the cardigan, the leaves on the background), each as its own shape, nearest first."""
+        regs = [f for f in flats if f['area'] == area]
+        if not regs:
+            return []
+        weight = {}
+        for f in regs:
+            weight[tuple(f['rgb'])] = weight.get(tuple(f['rgb']), 0) + f['n']
+        main = max(weight, key=weight.get)
+        k = ORDER.index(area) + 1
+        sl = ndimage.find_objects((area_lab == k).astype(int))[0]
+        base = dict(id=k, area=area, box=[sl[0].start, sl[0].stop, sl[1].start, sl[1].stop], n=int((area_lab == k).sum()),
+                    rgb=np.array(main), lab='area', grow=2)
+        out_ = paint_shape(base, area_lab, rng, tip(), extra=extra, **FILL[area])
+        if out_:
+            state['tip'] = out_[-1]['points'][-1]
+        tops = [f for f in regs if tuple(f['rgb']) != main]
+        for (f,) in nearest_order([(f,) for f in tops], tip(), key=lambda t: cen(t[0])):
+            add = paint_shape(f, flat_lab, rng, tip(), extra=extra, **{**FILL[area], 'max_rows': None, 'edge': False})
             out_ += add
             if add:
                 state['tip'] = add[-1]['points'][-1]
@@ -789,7 +888,7 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
                 continue
             items = [s for s in shades if s['kind'] == kind and s['area'] == area and s['id'] in keep[kind]]
             for (s,) in nearest_order([(s,) for s in items], tip(), key=lambda t: cen(t[0])):
-                add = paint_shape(s, shade_lab, rng, tip(), free=flat_lab == s['base'], max_R=30., wide=1., **FILL[area])
+                add = paint_shape(s, shade_lab, rng, tip(), free=flat_lab == s['base'], max_R=30., wide=1., rim=False, **FILL[area])
                 add_all += add
                 if add:
                     state['tip'] = add[-1]['points'][-1]
@@ -814,7 +913,7 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
         mine = lambda s: ((s['box'][2] + s['box'][3]) / 2 > mid_x) == side
         items =sorted((s for s in shades if s['area'] == 'eyes' and mine(s)), key=lambda s: (s['kind'] != 'shadow', -s['n']))
         for s in items:
-            add = paint_shape(s, shade_lab, rng, tip(), free=flat_lab == s['base'], extra=dict(focal=True, eye=True))
+            add = paint_shape(s, shade_lab, rng, tip(), free=flat_lab == s['base'], rim=False, extra=dict(focal=True, eye=True))
             eye_strokes += add
             if add:
                 state['tip'] = add[-1]['points'][-1]
