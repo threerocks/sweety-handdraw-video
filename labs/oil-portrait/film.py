@@ -786,7 +786,8 @@ def main():
     reference = np.asarray(Image.open(d / 'reference.png').convert('RGB'))
     rng = np.random.default_rng(3)
     palette = Palette(rng)
-    default_hand = {'sketch': HERE / 'src' / 'hand-tang-pencil.png', 'anime': HERE / 'src' / 'hand-tang-stylus.png'}
+    default_hand = {'oil': HERE / 'src' / 'hand-tang-red.png', 'sketch': HERE / 'src' / 'hand-tang-pencil.png',
+                    'anime': HERE / 'src' / 'hand-tang-stylus.png'}
     hand = Hand(args.hand or default_hand.get(KIND[0], HAND))
     hands = {'pencil': hand}
     if KIND[0] == 'sketch' and not args.hand:
