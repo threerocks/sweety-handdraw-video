@@ -1,6 +1,6 @@
 # sweety-handdraw-video
 
-安装一个 Skill，按主题或文章制作完整手绘讲解视频。当前版本：v3.0.2。
+安装一个 Skill，按主题或文章制作完整手绘讲解视频。当前版本：v3.1.0。
 
 - 使用入口：[SKILL.md](SKILL.md)
 - 项目说明、安装与样片：[GitHub README](https://github.com/threerocks/sweety-handdraw-video)

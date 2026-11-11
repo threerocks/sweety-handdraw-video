@@ -8,7 +8,7 @@ Agent 负责理解内容、写口播、设计分镜和生成插画；本地工�
 
 [看有声样片](#精选样片) · [安装与环境](#安装与环境) · [开始制作](#开始制作) · [全部制作选项](#全部制作选项) · [常见问题](#常见问题) · [关注作者](https://x.com/leo_xiaolei)
 
-> **当前版本：v3.0.2（2026-11-03）**。修复做 3.0 宣传片时遇到的三个小问题：近景重绘的笔尖路径偏了半个放大像素、近方形线稿上色后被压扁、`gen --edit 名字` 的写法被拒，详见 [v3.0.2 发布记录](docs/releases/v3.0.2.md)。v3.0.1 修复了上色后每块颜色都带斜向笔道的问题：完成色默认平涂，与原图一致，见 [v3.0.1 发布记录](docs/releases/v3.0.1.md)。3.0 是手绘线的收官版本：先出线稿再上色，笔先起形、按模块描线、用橡皮擦掉起形，再拿马克笔由浅到深上色，墨线有压感、完成色平整干净；水印每页自动避开画面，旁白在封面渐隐时就开口，框里的字按词断行，讲解形式（清单、表格、流程、地图、公式、机制动画）按口播的字出现；一部片只写数据，不再手写脚本（制作工具包）。详见 [v3.0.0 发布记录](docs/releases/v3.0.0.md)；3.0.0 的进展和本版修复的问题见 [#19](https://github.com/threerocks/sweety-handdraw-video/issues/19)。2.0 系列见 [v2.0.2](docs/releases/v2.0.2.md)、[v2.0.1](docs/releases/v2.0.1.md) 与 [v2.0.0](docs/releases/v2.0.0.md) 记录，v1.5 见[其发布记录](docs/releases/v1.5.0.md)。以包内 `VERSION` 和 Git 标签为准。
+> **当前版本：v3.1.0（2026-11-12）**。新增人像绘画实验室 `labs/oil-portrait/`：一张人像照片、一条命令，得到油画、素描或动漫插画一笔一笔画出来的过程视频，换用较小的模型驱动也能得到同样的片子，详见 [v3.1.0 发布记录](docs/releases/v3.1.0.md)。手绘口播 Skill 本身与 v3.0.2 相同。v3.0.2 修复了做 3.0 宣传片时遇到的三个小问题：近景重绘的笔尖路径偏了半个放大像素、近方形线稿上色后被压扁、`gen --edit 名字` 的写法被拒，详见 [v3.0.2 发布记录](docs/releases/v3.0.2.md)。v3.0.1 修复了上色后每块颜色都带斜向笔道的问题：完成色默认平涂，与原图一致，见 [v3.0.1 发布记录](docs/releases/v3.0.1.md)。3.0 是手绘线的收官版本：先出线稿再上色，笔先起形、按模块描线、用橡皮擦掉起形，再拿马克笔由浅到深上色，墨线有压感、完成色平整干净；水印每页自动避开画面，旁白在封面渐隐时就开口，框里的字按词断行，讲解形式（清单、表格、流程、地图、公式、机制动画）按口播的字出现；一部片只写数据，不再手写脚本（制作工具包）。详见 [v3.0.0 发布记录](docs/releases/v3.0.0.md)；3.0.0 的进展和本版修复的问题见 [#19](https://github.com/threerocks/sweety-handdraw-video/issues/19)。2.0 系列见 [v2.0.2](docs/releases/v2.0.2.md)、[v2.0.1](docs/releases/v2.0.1.md) 与 [v2.0.0](docs/releases/v2.0.0.md) 记录，v1.5 见[其发布记录](docs/releases/v1.5.0.md)。以包内 `VERSION` 和 Git 标签为准。
 
 ## 精选样片
 
@@ -98,7 +98,7 @@ Agent 负责理解内容、写口播、设计分镜和生成插画；本地工�
 npx skills add threerocks/sweety-handdraw-video --skill sweety-handdraw-video --agent claude-code codex --global --copy --yes
 ```
 
-安装位置：Claude Code 为 `~/.claude/skills/sweety-handdraw-video`，Codex 为 `~/.agents/skills/sweety-handdraw-video`（该命令写入的通用目录）。只装一个宿主时去掉另一个 `--agent` 值；不加 `--global` 则装进当前项目（Claude Code 为 `.claude/skills/`）。此命令安装仓库当前公开内容。需要固定本版时，使用 [v3.0.2 安装包](https://github.com/threerocks/sweety-handdraw-video/releases/download/v3.0.2/sweety-handdraw-video-v3.0.2.zip)；[全部版本](https://github.com/threerocks/sweety-handdraw-video/releases)。下载同页的 `SHA256SUMS.txt`，执行 `shasum -a 256 -c SHA256SUMS.txt` 校验。更新仓库不会自动更新已安装的副本；替换完整 Skill 目录后，读取其中的 `VERSION`，本版应为 `3.0.0`。
+安装位置：Claude Code 为 `~/.claude/skills/sweety-handdraw-video`，Codex 为 `~/.agents/skills/sweety-handdraw-video`（该命令写入的通用目录）。只装一个宿主时去掉另一个 `--agent` 值；不加 `--global` 则装进当前项目（Claude Code 为 `.claude/skills/`）。此命令安装仓库当前公开内容。需要固定本版时，使用 [v3.1.0 安装包](https://github.com/threerocks/sweety-handdraw-video/releases/download/v3.1.0/sweety-handdraw-video-v3.1.0.zip)；[全部版本](https://github.com/threerocks/sweety-handdraw-video/releases)。下载同页的 `SHA256SUMS.txt`，执行 `shasum -a 256 -c SHA256SUMS.txt` 校验。更新仓库不会自动更新已安装的副本；替换完整 Skill 目录后，读取其中的 `VERSION`，本版应为 `3.1.0`。
 
 手动安装：将包内的 `sweety-handdraw-video` **整个文件夹**放入宿主的 Skills 目录，例如 `~/.claude/skills/sweety-handdraw-video`（Claude Code）或 `~/.codex/skills/sweety-handdraw-video`（Codex）。更新前备份旧目录；仅复制 `SKILL.md` 会缺少脚本、素材和内置依赖。手部、画风预览与试听已随包提供（约 38 MB），装好即可离线使用，不再依赖首次下载。
 
