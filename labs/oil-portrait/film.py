@@ -117,14 +117,34 @@ def lapses(evs, cruise):
     return out
 
 
+EVEN_RAMP = .12                      # share of a paced motion spent speeding up, and slowing down
+EVEN_PEAK = 1 / (1 - EVEN_RAMP)      # its peak speed over its mean speed (a min-jerk motion: 1.875)
+
+
+def even_fraction(tau, r=EVEN_RAMP):
+    """Distance travelled at time tau of a motion that eases in, cruises at an even speed and eases out: a long
+    colouring stroke is drawn at a steady pace, not in one swing."""
+    tau = min(1., max(0., tau))
+    if tau < r:
+        return tau * tau / (2 * r) / (1 - r)
+    if tau > 1 - r:
+        return 1 - (1 - tau) ** 2 / (2 * r) / (1 - r)
+    return (tau - r / 2) / (1 - r)
+
+
 def floor(e):
     """Shortest video time an event may take: no long lift jumps across the canvas between two frames."""
     d = e.get('dist', 0.)
-    if e['kind'] == 'stroke' and e['st'].get('hold'):     # anime: a stroke is on screen at least this long (colour is
-        hold = e['st']['hold']                            # never laid between two frames with the hand elsewhere)
-        if e.get('floorL', e['L']) > 200:
-            return max(hold, 1.875 * e.get('floorL', e['L']) / (STROKE_PX * FPS))
-        return hold
+    nib = e.get('nib')
+    if nib and e['kind'] in ('stroke', 'travel'):
+        # anime: the nib never moves farther than this between two frames (px on screen at the motion's peak, drawing
+        # and lifted), so every motion can be followed; a close-up shows the canvas twice as large
+        z = ZOOM if e.get('slow') else 1.
+        if e['kind'] == 'travel':
+            return EVEN_PEAK * d * z / (nib[1] * FPS)
+        return max(e['st'].get('hold', 0.), EVEN_PEAK * e['L'] * z / (nib[0] * FPS))
+    if e['kind'] == 'stroke' and e['st'].get('hold'):     # a stroke that is on screen at least this long
+        return e['st']['hold']
     if e['kind'] == 'travel' and d > JUMP:
         return 1.875 * d / (HAND_PX * FPS)
     if e['kind'] == 'mix' and e.get('trip'):
@@ -607,6 +627,10 @@ def build(plan, palette):
             if need > feature_cap:
                 for e in others:
                     e['slow'] = base * need / feature_cap
+        nib_px = ps.get('nib_px', pace.get('nib_px'))       # anime plans cap the nib's travel per frame (see floor)
+        if nib_px:
+            for e in evs:
+                e['nib'] = (nib_px, ps.get('travel_px', pace.get('travel_px', nib_px)))
         if KIND[0] != 'oil':
             evs = group_events(evs)
         timeline.append(evs)
@@ -830,13 +854,13 @@ def main():
         lift, partial, ppartial = 1., None, None
         k = e['kind']
         if k == 'stroke':
-            s_now = e['L'] * distance_fraction(tau, 'minjerk')
+            s_now = e['L'] * (even_fraction(tau) if e.get('nib') else distance_fraction(tau, 'minjerk'))
             tip = along(e['path'], e['s'], s_now)
             lift = 0.
             partial = advance(e, s_now) if 'group' in e else (ensure(e), s_now)
             paint_rgb = e['rgb']
         elif k in ('travel', 'enter', 'leave'):
-            u = distance_fraction(tau, 'minjerk')
+            u = even_fraction(tau) if e.get('nib') else distance_fraction(tau, 'minjerk')
             tip = bezier(np.asarray(e['a'], float), np.asarray(e['b'], float), u)
             lift = math.sin(math.pi * min(1., tau * 1.15)) ** .6 if k == 'travel' else 1.
         elif k == 'mix':
@@ -919,7 +943,7 @@ def main():
         tip_prev = tip
         strength = .6 if (paint_rgb is not None and e.get('st', {}).get('medium') == 'pencil') else .85
         frame = hand.draw(frame, tip, lift, paint_rgb if KIND[0] == 'oil' else None, angle, strength)
-        tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi'])])
+        tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi']), float(zoom[f])])
         header = frame[:HEADER + HEADER_FADE].astype(float) if zoom[f] > 1.001 else None
         frame = apply_camera(frame, zoom[f], cam_x[f], cam_y[f])
         if header is not None:     # in a close-up the title and pass labels stay put at their normal size, on paper

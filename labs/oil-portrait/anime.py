@@ -37,13 +37,17 @@ import planes
 from paint import W, H, AREAS, FEATURES, EYE_FEATURES, REGIONS, load_subject, ellipse_mask, rgb2lab, kmeans
 
 LUM = np.array([.299, .587, .114])
-PACE = dict(feature_cap=5.,eye_life={'lines': 6., 'polish': 4., 'dianjing': 2.5})
+# nib_px / travel_px: the farthest the nib moves between two film frames, drawing and lifted (film.floor)
+PACE = dict(feature_cap=5., eye_life={'lines': 6., 'polish': 4., 'dianjing': 2.5}, nib_px=85., travel_px=84.)
 ROUGH_RGB = [.42, .62, .92]
 SURF = None
 # per area: materials (coarse clusters, chroma first) and shades per material
 CLUSTERS = {'skin': (4, 3), 'hair': (1, 5),'eyes': (3, 3), 'clothes': (3, 3), 'bg': (3, 3)}
-ORDER = ['skin', 'eyes', 'hair', 'clothes', 'bg']     # the face first, its eyes with it
+ORDER = ['eyes', 'skin', 'hair', 'clothes', 'bg']     # the eyes first: once colouring starts they are never bare
 HOLD = 1 / 30.        # s of film a colour stroke (or a group of them laid in one motion) is on screen at least
+FLAT_MIN = 300        # px: a smaller patch of flat colour joins the shape beside it
+SHADE_MIN = 120       # px: a smaller cel shape is left to the last adjustment
+MOST = {'shadow': 40, 'light': 42}   # the cel shapes painted in a pass: the largest ones
 THIN = 5.5           # px: a shape no deeper than this is one stroke along its middle
 SOFT_EDGE = .03       # a shade whose edge in the illustration is softer than this is a gradient, not a cel shape
 SLIDER = ((300., 1680.), (740., 1680.))   # the 调色 slider of the colour panel, in canvas coordinates (below the canvas)
@@ -273,7 +277,7 @@ def take_apart(C0, areas, rng):
             base_rgb = np.median(C0[(sh == base) & mm], 0)
             F1[mm] = base_rgb
             F2[mm] = base_rgb
-            for sub_m, sl, n in shapes_of(mm, 40):
+            for sub_m, sl, n in shapes_of(mm, 20 if area == 'eyes' else FLAT_MIN):
                 k = len(flats) + 1
                 flat_lab[sl][sub_m] = k
                 flats.append(dict(id=k, area=area, box=[sl[0].start, sl[0].stop, sl[1].start, sl[1].stop], n=n,
@@ -285,7 +289,7 @@ def take_apart(C0, areas, rng):
                     continue
                 rgb = np.median(C0[sj], 0)
                 kind = 'shadow' if rgb2lab(rgb)[0] < base_L else 'light'
-                for sub_m, sl, n in shapes_of(sj, 24):
+                for sub_m, sl, n in shapes_of(sj, 14 if area == 'eyes' else SHADE_MIN):
                     ys, xs = np.nonzero(sub_m)
                     bid = int(flat_lab[sl][ys[0], xs[0]])
                     # its free edge (against its own base, not the base's outline): hard in the illustration, or soft?
@@ -302,7 +306,7 @@ def take_apart(C0, areas, rng):
                     shade_lab[sl][sub_m] = k
                     F2[sl][sub_m] = rgb
                     shades.append(dict(id=k, kind=kind, area=area, box=[sl[0].start, sl[0].stop, sl[1].start, sl[1].stop],
-                                       n=n, rgb=rgb, base=bid, lab='shade'))
+                                       n=n, rgb=rgb, base=bid, lab='shade', pt=(int(xs[0] + sl[1].start), int(ys[0] + sl[0].start))))
     stray = flat_lab == 0                     # specks too small to be a shape belong to the shape beside them
     if stray.any():
         _, (iy, ix) = ndimage.distance_transform_edt(stray, return_indices=True)
@@ -311,6 +315,8 @@ def take_apart(C0, areas, rng):
         F2[stray] = F2[iy, ix][stray]
         for f, sl in zip(flats, ndimage.find_objects(flat_lab)):
             f['box'] = [sl[0].start, sl[0].stop, sl[1].start, sl[1].stop]
+    for s in shades:                          # a shade on a patch that joined its neighbour is clipped to that neighbour
+        s['base'] = int(flat_lab[s['pt'][1], s['pt'][0]])
     print(f'flat shapes {len(flats)}, cel shapes {len(shades)} (+{soft_n} soft ones left to the airbrush)')
     return F1, F2, flats, shades, flat_lab, shade_lab
 
@@ -362,62 +368,121 @@ def edge_runs(m, depth, free):
     return out
 
 
-def scribble(m, R, tip, angle=None, bow=0.):
-    """Colouring in: back-and-forth rows over a shape, each a brush width from the last, the pen staying down from one
-    row to the next while they are close. Rows run along the shape's long axis (or at angle), bowed a little if the
-    form is round (bow, as a share of the row's length); they stop short of the shape's ends so the brush stays
-    inside it. Returns the polylines, in crop coordinates."""
+def joined(paths, tip):
+    """Several paths as one motion: nearest first, each entered at its nearer end."""
+    left, out, tip = [np.asarray(p, float) for p in paths], [], np.asarray(tip, float)
+    while left:
+        k = int(np.argmin([min(np.linalg.norm(p[0] - tip), np.linalg.norm(p[-1] - tip)) for p in left]))
+        p = left.pop(k)
+        if np.linalg.norm(p[-1] - tip) < np.linalg.norm(p[0] - tip):
+            p = p[::-1]
+        out.append(p)
+        tip = p[-1]
+    return np.vstack(out)
+
+
+def cover_paths(m, R, tip, angle=None, bow=0., max_rows=None, top_first=False, gap=1.25):
+    """Colouring in a shape with a brush of radius R: rows a brush width apart (along the shape's long axis, or at
+    angle; bowed a little for a round form), joined into as few continuous back-and-forth motions as the shape
+    allows: where a row is cut in two (hair either side of a face) each part carries on as its own motion, and a
+    motion may be ended after max_rows rows (a lock of hair). Rows run to the shape's very ends, so the brush laps
+    over its edge and the clip trims it. A tip or corner the rows miss is a short detour of the motion passing
+    nearest; only a part too big for that (over 1.5% of the shape) gets a motion of its own. Returns polylines, in
+    crop coordinates."""
     ys, xs = np.nonzero(m)
     if angle is None:
         cov = np.cov(np.vstack([xs, ys])) if len(xs) > 2 else np.eye(2)
         t = np.linalg.eigh(cov + np.eye(2) * 1e-6)[1][:, -1]
     else:
         t = np.array([math.cos(angle), math.sin(angle)])
+    if top_first and t[1] < 0:
+        t = -t
     nrm = np.array([-t[1], t[0]])
     pn, pt = xs * nrm[0] + ys * nrm[1], xs * t[0] + ys * t[1]
-    spacing = R * 1.25
     width = pn.max() - pn.min()
-    offs = np.arange(pn.min() + min(R * .6, width / 2), pn.max() - R * .2 + 1e-6, spacing)
+    offs = np.arange(pn.min() + min(R * .6, width / 2), pn.max() - R * .2 + 1e-6, R * gap)
     if not len(offs):
         offs = np.array([(pn.min() + pn.max()) / 2])
     if abs(np.dot(tip, nrm) - offs[-1]) < abs(np.dot(tip, nrm) - offs[0]):
         offs = offs[::-1]
-    lines, cur, back = [], [], False
+    chains, open_ = [], []
     for o in offs:
         band = np.abs(pn - o) < .5
         if band.sum() < 2:
             band = np.abs(pn - o) < 1.
-            if band.sum() < 2:
-                continue
         u = np.sort(pt[band])
-        runs = [r for r in np.split(u, np.flatnonzero(np.diff(u) > max(3., R)) + 1) if len(r)]
-        if back:
-            runs = runs[::-1]
-        for r in runs:
-            a, b = (r[-1], r[0]) if back else (r[0], r[-1])
-            inset = min(.7 * R, abs(b - a) / 2 - .5) * (1 if b >= a else -1)
-            a, b = a + inset, b - inset
+        runs = [(r[0], r[-1]) for r in np.split(u, np.flatnonzero(np.diff(u) > max(3., R)) + 1) if len(r)] if len(u) else []
+        used, still = set(), []
+        for ch in open_:
+            lo0, hi0 = ch[-1][1:]
+            best, most = None, 0.
+            for j, (lo, hi) in enumerate(runs):
+                ov = min(hi, hi0) - max(lo, lo0)
+                if j not in used and ov > most:
+                    best, most = j, ov
+            if best is not None and (max_rows is None or len(ch) < max_rows):
+                ch.append((o,) + runs[best])
+                used.add(best)
+                still.append(ch)
+        for j, r in enumerate(runs):
+            if j not in used:
+                chains.append([(o,) + r])
+                still.append(chains[-1])
+        open_ = still
+    paths = []
+    for ch in chains:
+        pts = []
+        lo, hi = ch[0][1:]
+        back = False if top_first else abs(np.dot(tip, t) - hi) < abs(np.dot(tip, t) - lo)
+        for o, lo, hi in ch:
+            a, b = (hi, lo) if back else (lo, hi)
             n = max(2, int(abs(b - a) / 30) + 2)
-            us = np.linspace(a, b, n)
             arc = bow * abs(b - a) * np.sin(np.pi * np.linspace(0, 1, n))
-            seg = [(o + k) * nrm + uu * t for uu, k in zip(us, arc)]
-            if cur and np.linalg.norm(seg[0] - cur[-1]) < 3.6 * R:
-                cur += seg
-            else:
-                if len(cur) > 1:
-                    lines.append(np.array(cur))
-                cur = seg
-        back = not back
-    if len(cur) > 1:
-        lines.append(np.array(cur))
-    return lines
+            pts += [(o + k) * nrm + uu * t for uu, k in zip(np.linspace(a, b, n), arc)]
+            back = not back
+        paths.append(np.array(pts))
+    # the motions worth making: long enough to be a sweep; the rest are corners for a detour
+    total = lambda p: float(np.linalg.norm(np.diff(p, axis=0), axis=1).sum())
+    main = [p for p in paths if total(p) >= 3 * R] or [max(paths, key=total)]
+    from PIL import ImageDraw
+    img = Image.new('L', (m.shape[1], m.shape[0]), 0)
+    dr = ImageDraw.Draw(img)
+    for p in main:
+        dr.line([tuple(q) for q in p] if len(p) > 1 else [tuple(p[0]), tuple(p[0] + .5)], fill=255, width=1)
+    bare = m & (ndimage.distance_transform_edt(np.asarray(img) == 0) > R * .95)
+    comp, n = ndimage.label(bare)
+    if n:
+        sizes = ndimage.sum_labels(np.ones(m.shape), comp, index=np.arange(1, n + 1))
+        floor_px = max(12., .002 * m.sum())
+        for k in np.argsort(-sizes)[:14]:
+            if sizes[k] < floor_px:
+                break
+            cy, cx = np.nonzero(comp == k + 1)
+            P = np.c_[cx, cy].astype(float)
+            if sizes[k] > .015 * m.sum() and sizes[k] > 6 * R * R:      # a part of its own: its own (smaller) motion
+                part = comp == k + 1
+                deep = float(ndimage.distance_transform_edt(part).max())
+                main += cover_paths(part, float(np.clip(deep * .9 + 1., 2.5, R)), main[-1][-1], angle, bow, max_rows, top_first)[:2]
+                continue
+            ax = np.linalg.eigh(np.cov(P.T) + np.eye(2) * 1e-6)[1][:, -1] if len(P) > 2 else np.array([1., 0.])
+            pr = (P - P.mean(0)) @ ax
+            ends = [P[int(np.argmin(pr))], P[int(np.argmax(pr))]]
+            # the vertex of a motion that passes nearest: detour from there to the corner and on
+            best = min(((float(np.linalg.norm(p - P.mean(0), axis=1).min()), i) for i, p in enumerate(main)))[1]
+            p = main[best]
+            j = int(np.argmin(np.linalg.norm(p - P.mean(0), axis=1)))
+            if np.linalg.norm(ends[1] - p[j]) < np.linalg.norm(ends[0] - p[j]):
+                ends = ends[::-1]
+            main[best] = np.vstack([p[:j + 1], ends[0], ends[1], p[j:]])
+    return main
 
 
-def paint_shape(sh, labmap, rng, tip, *, free=None, angle=None, bow=0., max_R=44., extra=None):
-    """One shape, coloured in with the pen, every pixel under the nib: a thin one as a stroke along its middle (a dab
-    if tiny); otherwise a careful stroke along its edge, just inside it (free: only where the edge is not the edge of
-    the base it is clipped to), then broad back-and-forth strokes across the inside, a brush wide enough for the
-    shape, and smaller ones for whatever corner is still bare."""
+def paint_shape(sh, labmap, rng, tip, *, free=None, edge=True, angle=None, bow=0., max_R=64., wide=.65, max_rows=None,
+                top_first=False, extra=None):
+    """One shape, coloured in with the pen in one or two motions, every pixel under the nib: a thin one (or a long
+    narrow lock) as one stroke along its middle, a dab if tiny; otherwise, for a shape big enough to need it, a
+    careful stroke along its edge just inside it (free: only where the edge is not the edge of the base it is clipped
+    to), then the back-and-forth of cover_paths across the inside."""
     extra = extra or {}
     m, ya, xa = crop(labmap, sh)
     if m.sum() < 4:
@@ -428,84 +493,45 @@ def paint_shape(sh, labmap, rng, tip, *, free=None, angle=None, bow=0., max_R=44
     d = ndimage.distance_transform_edt(np.pad(m, 1))[1:-1, 1:-1] if m.all() else ndimage.distance_transform_edt(m)
     maxd = float(d.max())
     out = []
-    cover = np.zeros(m.shape, np.float32)
-    ys, xs = np.nonzero(m)
-    cen = np.array([xs.mean(), ys.mean()])
+    tip_l = np.asarray(tip, float) - off
 
     def add(points, R, **kw):
-        st = stroke(np.asarray(points, float) + off, R, 'cel', rng, rgb=rgb, clip=clip, **{**extra, **kw})
-        p = SURF.render(st)
-        if p is None or not len(p['gy']):
-            return
-        SURF.commit(p)
-        gy, gx = p['gy'] - ya, p['gx'] - xa
-        ok = (gy >= 0) & (gy < m.shape[0]) & (gx >= 0) & (gx < m.shape[1])
-        np.maximum.at(cover, (gy[ok], gx[ok]), p['alpha'][ok])
-        out.append(st)
-
-    def dab(mask):
-        yy, xx = np.nonzero(mask)
-        r = math.sqrt(len(xx) / math.pi)
-        c = np.array([xx.mean(), yy.mean()])
-        add([c - [r * .3, 0], c + [r * .3, 0]], r + 1.2, press=(.8, .7), role='dab')
+        out.append(lay(stroke(np.asarray(points, float) + off, R, 'cel', rng, rgb=rgb, clip=clip, **{**extra, **kw})))
 
     streak = maxd <= 2 * THIN and sh['n'] > 14 * maxd * maxd      # long and narrow (a lock of hair): one pressed stroke
     if maxd <= THIN or streak:
         paths = [p for p in traced(m) if length(p) >= 3]
         if not paths:
-            dab(m)
-        for p in paths:
-            if (abs(p[-1][1] - p[0][1]) >= abs(p[-1][0] - p[0][0]) and p[-1][1] < p[0][1]) or \
-                    (abs(p[-1][1] - p[0][1]) < abs(p[-1][0] - p[0][0]) and p[-1][0] < p[0][0]):
-                p = p[::-1]
-            pi = np.clip(np.rint(p).astype(int), 0, [m.shape[1] - 1, m.shape[0] - 1])
-            R = float(np.percentile(d[pi[:, 1], pi[:, 0]], 90)) + 1.4
-            add(thin(p, max(4., 2 * R)), R, press=(.45, .35), pvar=.08, role='streak')
+            ys, xs = np.nonzero(m)
+            r = math.sqrt(sh['n'] / math.pi)
+            c = np.array([xs.mean(), ys.mean()])
+            add([c - [r * .3, 0], c + [r * .3, 0]], r + 1.2, press=(.8, .7), role='dab')
+            return out
+        p = joined(paths, tip_l)
+        pi = np.clip(np.rint(p).astype(int), 0, [m.shape[1] - 1, m.shape[0] - 1])
+        R = float(np.percentile(d[pi[:, 1], pi[:, 0]], 90)) + 1.6
+        add(thin(p, max(4., 2 * R)), R, press=(.45, .35), pvar=.08, role='streak')
         return out
-    tip_l = np.asarray(tip, float) - off
-    Rf = float(np.clip(maxd * .55, 3., max_R))                       # the brush that fills
-    Re = float(np.clip(Rf * .4, 2.6, 12.))                            # the smaller one that takes the edge
-    edge = free[ya:ya + m.shape[0], xa:xa + m.shape[1]] if free is not None else np.ones(m.shape, bool)
-    for (p,) in nearest_order([(p,) for p in edge_runs(m, Re * .8, edge)], tip_l, key=lambda it: it[0][0]):
-        L = length(p)
-        add(thin(p, max(4., 1.6 * Re)), Re * 1.15, press=(.7, .6), pvar=.06, wobble=1, seconds=.1 + L / 420, role='edge')
+    Rf = float(np.clip(maxd * wide, 3., max_R))                       # the brush that fills
+    if edge and sh['n'] >= 1500:
+        Re = float(np.clip(Rf * .4, 2.6, 12.))                        # the smaller one that takes the edge
+        em = free[ya:ya + m.shape[0], xa:xa + m.shape[1]] if free is not None else np.ones(m.shape, bool)
+        runs = edge_runs(m, Re * .8, em)
+        if runs:
+            p = joined(runs, tip_l)
+            add(thin(p, max(4., 1.6 * Re)), Re * 1.15, press=(.7, .6), pvar=.06, wobble=1, role='edge')
+            tip_l = p[-1]
+    for p in cover_paths(m, Rf, tip_l, angle, bow, max_rows, top_first):
+        if len(p) < 2:
+            p = np.vstack([p, p + [.6, 0]])
+        add(p, Rf, press=(.9, .85), wobble=1, pvar=.04, role='fill')
         tip_l = p[-1]
-    for rnd in range(4):
-        todo = m & (cover < .5)
-        comp, n = ndimage.label(todo)
-        if not n:
-            break
-        sizes = ndimage.sum_labels(np.ones(m.shape), comp, index=np.arange(1, n + 1))
-        ids = [k + 1 for k in np.argsort(-sizes)[:40] if sizes[k] >= 10]
-        if not ids:
-            break
-        objs = ndimage.find_objects(comp)
-        items = [(np.array([(objs[k - 1][1].start + objs[k - 1][1].stop) / 2, (objs[k - 1][0].start + objs[k - 1][0].stop) / 2]), k)
-                 for k in ids]
-        for c, k in nearest_order(items, tip_l):
-            sl = objs[k - 1]
-            part = comp[sl] == k
-            o2 = np.array([sl[1].start, sl[0].start], float)
-            deep = float(ndimage.distance_transform_edt(np.pad(part, 1)).max())
-            if deep < .8:                  # a hairline at the rim, under the line art
-                continue
-            if deep < 2.6:                 # a sliver: one small stroke along it
-                paths = [p for p in traced(part) if length(p) >= 3]
-                if not paths:
-                    dab(np.pad(part, ((sl[0].start, m.shape[0] - sl[0].stop), (sl[1].start, m.shape[1] - sl[1].stop))))
-                for p in paths:
-                    add(thin(p, 6.) + o2, deep + 1.4, press=(.6, .5), role='rest')
-                    tip_l = p[-1] + o2
-                continue
-            R = float(np.clip(deep * .9 + 1., 2.5, Rf))                # the bare part plus the painted rim it laps over
-            for p in scribble(part, R, tip_l - o2, angle=angle, bow=bow):
-                add(p + o2, R, press=(.9, .85), wobble=1, pvar=.04, role='fill' if rnd == 0 else 'rest')
-                tip_l = p[-1] + o2
     return out
 
 
-def sweeps(level, mask, clip, rng, tip, *, R, thr, opacity, angle, **kw):
-    """Soft gradients: long slow airbrush sweeps, back and forth, wherever the area is still off the illustration."""
+def sweeps(level, mask, clip, rng, tip, *, R, thr, opacity, angle, most=4, **kw):
+    """Soft gradients: wherever the area is still off the illustration, the airbrush goes over it in one long
+    back-and-forth motion per patch (the largest few patches)."""
     diff = ndimage.gaussian_filter(np.abs(SURF.canvas - media.LEVELS[level]).max(-1), R * .3)
     active = mask & (diff > thr)
     if active.sum() < 40:
@@ -513,31 +539,24 @@ def sweeps(level, mask, clip, rng, tip, *, R, thr, opacity, angle, **kw):
     grow = max(1, int(R * .5))                 # one sweep over a patchy stretch, not a dab on every patch
     active = ndimage.binary_erosion(ndimage.binary_dilation(active, iterations=2 * grow), iterations=grow)
     active &= ndimage.binary_dilation(mask, iterations=2)
-    ys, xs = np.nonzero(active)
-    t = np.array([math.cos(angle), math.sin(angle)])
-    nrm = np.array([-t[1], t[0]])
-    pn, pt = xs * nrm[0] + ys * nrm[1], xs * t[0] + ys * t[1]
-    offs = np.arange(pn.min() + R * .4, pn.max() + 1e-6, R * 1.15)
-    if abs(np.dot(tip, nrm) - offs[-1]) < abs(np.dot(tip, nrm) - offs[0]):
-        offs = offs[::-1]
-    out, back = [], False
-    for o in offs:
-        band = np.abs(pn - o) < .5
-        if band.sum() < 2:
-            continue
-        u = np.sort(pt[band])
-        runs = [r for r in np.split(u, np.flatnonzero(np.diff(u) > R * 1.5) + 1) if len(r) and r[-1] - r[0] >= R * .8]
-        if back:
-            runs = runs[::-1]
-        for r in runs:
-            a, b = (r[-1], r[0]) if back else (r[0], r[-1])
-            n = max(2, int(abs(b - a) / (R * 1.5)) + 2)
-            pts = np.array([o * nrm + uu * t for uu in np.linspace(a, b, n)])
-            pts[1:-1] += rng.normal(0, R * .08, (n - 2, 2))
-            mid = pts[len(pts) // 2]
+    comp, n = ndimage.label(active)
+    sizes = ndimage.sum_labels(np.ones((H, W)), comp, index=np.arange(1, n + 1))
+    objs = ndimage.find_objects(comp)
+    items = [(np.array([(objs[k][1].start + objs[k][1].stop) / 2, (objs[k][0].start + objs[k][0].stop) / 2]), k)
+             for k in np.argsort(-sizes)[:most] if sizes[k] >= 2 * R * R]
+    out = []
+    tip = np.asarray(tip, float)
+    for c, k in nearest_order(items, tip):
+        sl = objs[k]
+        off = np.array([sl[1].start, sl[0].start], float)
+        for p in cover_paths(comp[sl] == k + 1, R, tip - off, angle, gap=1.8)[:2]:
+            if len(p) < 2:
+                continue
+            p = p + off
+            mid = p[len(p) // 2]
             rgb = media.LEVELS[level][int(np.clip(mid[1], 0, H - 1)), int(np.clip(mid[0], 0, W - 1))]
-            out.append(lay(stroke(pts, R, 'air', rng, rgb=rgb, level=level, clip=clip, opacity=opacity, **kw)))
-        back = not back
+            out.append(lay(stroke(p, R, 'air', rng, rgb=rgb, level=level, clip=clip, opacity=opacity, wobble=1, **kw)))
+            tip = p[-1]
     return out
 
 
@@ -604,7 +623,7 @@ def ink_lines(la, areas, rng):
         L = length(p)
         mid = p[len(p) // 2]
         k = paint.feature_index(*mid)
-        if L < (3.5 if k >= 0 else 9.):
+        if L < (3.5 if k >= 0 else 30.):
             continue
         pi = np.clip(np.rint(p).astype(int), 0, [W - 1, H - 1])
         frac = lambda m: float(m[pi[:, 1], pi[:, 0]].mean())
@@ -735,20 +754,19 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
     for st in sk:
         st.update(medium='pen', layer='rough', rgb=ROUGH_RGB, mix_rgb=ROUGH_RGB, opacity=.6, R=1.5, press=(.5, .4),
                   seconds=.06 + length(st['points']) / 700)
-    run('rough', '草稿', rough + sk, 6., laid=False)
+    run('rough', '草稿', rough + sk, 6., laid=False, nib_px=240., travel_px=240.)     # the rough is dashed off
     # 线稿: the clean line art over it; the eyes' lines at life pace
-    run('lines', '线稿', ink_lines(la, areas, rng), 22., laid=False)
+    run('lines', '线稿', ink_lines(la, areas, rng), 22., laid=False, nib_px=115., travel_px=150.)
     surf.shown['rough'] = 0.
     # 平涂: flat colours under the line art (the rough is hidden first)
     cen = lambda f: ((f['box'][2] + f['box'][3]) / 2, (f['box'][0] + f['box'][1]) / 2)
     # how the fill strokes run in each area: hair along its fall, the face in shallow arcs across the cheeks
-    FILL = {'skin': dict(angle=.12, bow=.05), 'hair': dict(angle=math.pi / 2), 'eyes': {}, 'clothes': {}, 'bg': dict(angle=math.pi / 2)}
+    FILL = {'skin': dict(angle=.12, bow=.05), 'hair': dict(angle=math.pi / 2, max_rows=3, top_first=True, edge=False), 'eyes': {}, 'clothes': {}, 'bg': dict(angle=math.pi / 2, edge=False)}
 
     def lay_flats(area, **extra):
         regs = sorted((f for f in flats if f['area'] == area), key=lambda f: -f['n'])
-        big = [f for f in regs if f['n'] >= 3000]
-        rest = [f for (f,) in nearest_order([(f,) for f in regs if f['n'] < 3000], cen(big[-1]) if big else tip(),
-                                            key=lambda t: cen(t[0]))]
+        big = regs[:1]                         # the area's main shape, then its neighbours, nearest first
+        rest = [f for (f,) in nearest_order([(f,) for f in regs[1:]], cen(big[0]) if big else tip(), key=lambda t: cen(t[0]))]
         out_ = []
         for f in big + rest:
             add = paint_shape(f, flat_lab, rng, tip(), extra=extra, **FILL[area])
@@ -762,15 +780,16 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
         flat_strokes += lay_flats(area)
     run('flat', '平涂', flat_strokes, 22., hide=['rough'])
     # 阴影 / 高光: cel shapes of each material's shades, clipped to their base (the eyes wait for their close-up)
-    by_id = {f['id']: f for f in flats}
-    for kind, label, budget in (('shadow', '阴影', 12.), ('light', '高光', 14.)):
+    keep = {k: {s['id'] for s in sorted((s for s in shades if s['kind'] == k and s['area'] != 'eyes'),
+                                        key=lambda s: -s['n'])[:MOST[k]]} for k in MOST}
+    for kind, label, budget in (('shadow', '阴影', 8.), ('light', '高光', 14.)):
         add_all = []
         for area in ORDER:
             if area == 'eyes':
                 continue
-            items = [s for s in shades if s['kind'] == kind and s['area'] == area]
+            items = [s for s in shades if s['kind'] == kind and s['area'] == area and s['id'] in keep[kind]]
             for (s,) in nearest_order([(s,) for s in items], tip(), key=lambda t: cen(t[0])):
-                add = paint_shape(s, shade_lab, rng, tip(), free=flat_lab == s['base'], max_R=26., **FILL[area])
+                add = paint_shape(s, shade_lab, rng, tip(), free=flat_lab == s['base'], max_R=30., wide=1., **FILL[area])
                 add_all += add
                 if add:
                     state['tip'] = add[-1]['points'][-1]
@@ -778,8 +797,7 @@ def plan_anime(target_path, rough_path, areas_path, out, focus, eyes, signature,
     # 渐变: airbrush gradients toward the illustration's own colours, wide sweeps first
     soft = []
     angles = {'skin': .15, 'hair': math.pi / 2, 'clothes': 1.1, 'bg': .6}
-    rounds = {'bg': ((60., .03, .65),), 'hair': ((56., .03, .65),), 'clothes': ((40., .03, .65),),
-              'skin': ((30., .02, .6), (13., .035, .6))}
+    rounds = {'bg': ((80., .03, .7),), 'hair': ((70., .03, .7),), 'clothes': ((44., .03, .7),), 'skin': ((26., .025, .65),)}
     for area in ('bg', 'hair', 'clothes', 'skin'):
         for R, thr, op in rounds[area]:
             add = sweeps('C0', areas[area], area, rng, tip(), R=R, thr=thr, opacity=op, angle=angles[area])
