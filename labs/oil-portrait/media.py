@@ -21,6 +21,8 @@ CLIPS = paint.CLIPS   # region name -> soft 0..1 mask (shared with the oil engin
 LINE_RGB = np.array([.24, .13, .11])
 LEVELS = {}           # name -> (H, W, 3) colour a layer builds toward, pixel by pixel (saved as level-<name>.npy)
 ALPHAS = {}           # anime: name -> (H, W) coverage of the line art (saved as alpha-<name>.npy)
+LABELS = {}           # anime: name -> (H, W) int32 map of shapes; a stroke with clip=[name, id] is held inside shape id
+                      # (a clipping mask / a selection), saved as label-<name>.npy
 PAPER_TINT = np.array([1.01, 1., .975])   # graphite reads a touch warm on cream paper
 
 
@@ -86,10 +88,23 @@ def patch_of(f, alpha, colour, layer=None):
                 path=f['path'].astype(np.float32), s=f['s'].astype(np.float32), layer=layer)
 
 
+def label_clip(name, k, box):
+    """Soft coverage of shape k of a label map inside box: anti-aliased, and grown half a pixel so two shapes painted
+    side by side leave no light seam between them."""
+    y0, y1, x0, x1 = box
+    ya, yb, xa, xb = max(0, y0 - 2), min(H, y1 + 2), max(0, x0 - 2), min(W, x1 + 2)
+    m = ndimage.gaussian_filter((LABELS[name][ya:yb, xa:xb] == k).astype(np.float32), .7)
+    return np.clip(m * 2., 0, 1), ya, xa
+
+
 def clipped(stroke, f, a):
-    if stroke.get('clip'):
-        a = a * CLIPS[stroke['clip']][f['gy'], f['gx']]
-    return a
+    c = stroke.get('clip')
+    if not c:
+        return a
+    if isinstance(c, str):
+        return a * CLIPS[c][f['gy'], f['gx']]
+    m, ya, xa = label_clip(c[0], c[1], f['box'])
+    return a * m[f['gy'] - ya, f['gx'] - xa]
 
 
 def graphite(stroke, canvas):
@@ -178,7 +193,20 @@ def air(stroke, canvas):
     return patch_of(f, a, colour_of(stroke, f), layer=stroke.get('layer'))
 
 
-RENDER = {'graphite': graphite, 'stump': stump, 'eraser': eraser, 'pen': pen, 'cel': cel, 'air': air}
+def adjust(stroke, canvas):
+    """The last adjustment (the line art tinted toward the colours beside it, a soft glow, the tone curve): the whole
+    picture eases to its finished state on a layer above everything, like dragging an adjustment slider."""
+    gy, gx = np.mgrid[0:H, 0:W]
+    gy, gx = gy.ravel().astype(np.int32), gx.ravel().astype(np.int32)
+    n = len(gy)
+    return dict(box=(0, H, 0, W), gy=gy, gx=gx, ss=np.zeros(n, np.float32), alpha=np.ones(n, np.float32),
+                paint=LEVELS[stroke['level']].reshape(-1, 3).astype(np.float32), hgt=np.zeros(n, np.float32), L=2.5,
+                wpx=np.zeros(n, np.float32), path=np.asarray(stroke['points'], np.float32),
+                s=np.array([0., 2.5], np.float32), layer=stroke.get('layer', 'adjust'))
+
+
+RENDER = {'graphite': graphite, 'stump': stump, 'eraser': eraser, 'pen': pen, 'cel': cel, 'air': air,
+          'adjust': adjust}
 
 
 # ----------------------------------------------------------------------------------------------- surfaces

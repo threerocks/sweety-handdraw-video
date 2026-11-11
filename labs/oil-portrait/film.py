@@ -73,6 +73,8 @@ PIGMENTS = [(.96, .95, .92), (.93, .81, .56), (.78, .58, .26), (.86, .32, .21), 
 # ----------------------------------------------------------------------------------------------- timing
 def stroke_seconds(st, L):
     m, R = st['medium'], st['R']
+    if st.get('seconds'):             # anime: strokes that carry their own real duration (construction, the adjustment)
+        return st['seconds']
     if m == 'wash':
         return .25 + L / 1400
     if m == 'pencil':
@@ -115,9 +117,34 @@ def lapses(evs, cruise):
     return out
 
 
+EVEN_RAMP = .12                      # share of a paced motion spent speeding up, and slowing down
+EVEN_PEAK = 1 / (1 - EVEN_RAMP)      # its peak speed over its mean speed (a min-jerk motion: 1.875)
+
+
+def even_fraction(tau, r=EVEN_RAMP):
+    """Distance travelled at time tau of a motion that eases in, cruises at an even speed and eases out: a long
+    colouring stroke is drawn at a steady pace, not in one swing."""
+    tau = min(1., max(0., tau))
+    if tau < r:
+        return tau * tau / (2 * r) / (1 - r)
+    if tau > 1 - r:
+        return 1 - (1 - tau) ** 2 / (2 * r) / (1 - r)
+    return (tau - r / 2) / (1 - r)
+
+
 def floor(e):
     """Shortest video time an event may take: no long lift jumps across the canvas between two frames."""
     d = e.get('dist', 0.)
+    nib = e.get('nib')
+    if nib and e['kind'] in ('stroke', 'travel'):
+        # anime: the nib never moves farther than this between two frames (px on screen at the motion's peak, drawing
+        # and lifted), so every motion can be followed; a close-up shows the canvas twice as large
+        z = ZOOM if e.get('slow') else 1.
+        if e['kind'] == 'travel':
+            return EVEN_PEAK * d * z / (nib[1] * FPS)
+        return max(e['st'].get('hold', 0.), EVEN_PEAK * e['L'] * z / (nib[0] * FPS))
+    if e['kind'] == 'stroke' and e['st'].get('hold'):     # a stroke that is on screen at least this long
+        return e['st']['hold']
     if e['kind'] == 'travel' and d > JUMP:
         return 1.875 * d / (HAND_PX * FPS)
     if e['kind'] == 'mix' and e.get('trip'):
@@ -142,7 +169,8 @@ def group_events(evs):
         nxt = evs[i + 1] if i + 1 < len(evs) else None
         if e['kind'] == 'travel' and nxt is not None and nxt['kind'] == 'stroke' and not nxt['slow'] and not e['slow']:
             hop = float(np.linalg.norm(nxt['path'][0] - cur['path'][-1])) if cur is not None else 1e9
-            if hop < GROUP_HOP and cur['real'] + nxt['real'] < GROUP_REAL:
+            if hop < GROUP_HOP and cur['real'] + nxt['real'] < GROUP_REAL and not nxt['st'].get('solo') \
+                    and not cur['st'].get('solo'):
                 seg = np.linspace(cur['path'][-1], nxt['path'][0], max(2, int(hop / 3) + 2))[1:]
                 seg_s = cur['s'][-1] + np.cumsum(np.linalg.norm(np.diff(np.vstack([cur['path'][-1:], seg]), axis=0), axis=1))
                 start = seg_s[-1]
@@ -377,25 +405,30 @@ def make_surface(plan, d, tooth):
             media.LEVELS[f.stem[6:]] = np.load(f).astype(np.float32)
         for f in d.glob('alpha-*.npy'):
             media.ALPHAS[f.stem[6:]] = np.load(f).astype(np.float32)
+        for f in d.glob('label-*.npy'):
+            media.LABELS[f.stem[6:]] = np.load(f)
         return media.LayerSurface(plan.get('ground', (1., 1., 1.)), plan.get('layers', ('rough', 'line')))
     return OilSurface(plan.get('ground', paint.CANVAS_RGB), tooth)
 
 
 class Swatches:
-    """Anime: the drawing app's colour panel, the current colour large and the recent ones in a row."""
+    """Anime: the drawing app's panel: the current colour large, the recent ones in a row, the layers (the one being
+    drawn on marked, the rough greyed once hidden) and the slider of the last adjustment."""
+    LAYERS = [('rough', '草稿'), ('line', '线稿'), (None, '上色'), ('hi', '高光')]
+    SLIDER_X, SLIDER_Y = (300, 740), 226      # inside the panel; anime.SLIDER is the same span in canvas coordinates
 
     def __init__(self):
         self.recent = []
         self.cache = {}
 
-    def image(self, rgb):
+    def image(self, rgb, layer='rough', hidden=(), knob=0.):
         key = None if rgb is None else tuple(np.round(np.asarray(rgb) * 255).astype(int))
         if key is not None and (not self.recent or self.recent[-1] != key):
             if key in self.recent:
                 self.recent.remove(key)
             self.recent.append(key)
-            self.recent = self.recent[-14:]
-        ck = (key, tuple(self.recent))
+            self.recent = self.recent[-8:]
+        ck = (key, tuple(self.recent), layer, tuple(hidden), round(knob, 3))
         if ck not in self.cache:
             x, y, w, h = TRAY
             img = Image.new('RGBA', (w, h), (0, 0, 0, 0))
@@ -403,8 +436,23 @@ class Swatches:
             if key is not None:
                 dr.ellipse([40, 76, 176, 212], fill=key, outline=(205, 198, 188), width=3)
             for i, c in enumerate(reversed(self.recent[:-1] if key else self.recent)):
-                cx, cy = 236 + (i % 7) * 76, 104 + (i // 7) * 78
-                dr.rounded_rectangle([cx - 28, cy - 28, cx + 28, cy + 28], 12, fill=c, outline=(214, 208, 198), width=2)
+                cx, cy = 240 + i * 70, 62
+                dr.rounded_rectangle([cx - 26, cy - 26, cx + 26, cy + 26], 12, fill=c, outline=(214, 208, 198), width=2)
+            f = font(FONT_SANS, 28)
+            for i, (name, label) in enumerate(self.LAYERS):
+                x0 = 214 + i * 140
+                on, off = name == layer, name in hidden
+                dr.rounded_rectangle([x0, 112, x0 + 128, 172], 14, fill=(255, 255, 255, 255) if on else (243, 240, 235, 255),
+                                     outline=(176, 72, 42, 255) if on else (214, 208, 198, 255), width=4 if on else 2)
+                ink = (186, 180, 172, 255) if off else (INK + (255,) if on else (120, 112, 104, 255))
+                dr.ellipse([x0 + 14, 134, x0 + 30, 150], outline=ink, width=2, fill=None if off else ink)
+                dr.text((x0 + 42, 126), label, font=f, fill=ink)
+            (x0, x1), ys = self.SLIDER_X, self.SLIDER_Y
+            dr.text((214, ys - 16), '调色', font=f, fill=(120, 112, 104, 255))
+            dr.line([x0, ys, x1, ys], fill=(214, 208, 198, 255), width=6)
+            kx = x0 + (x1 - x0) * knob
+            dr.line([x0, ys, kx, ys], fill=(176, 72, 42, 255), width=6)
+            dr.ellipse([kx - 13, ys - 13, kx + 13, ys + 13], fill=(255, 255, 255, 255), outline=(176, 72, 42, 255), width=3)
             self.cache = {ck: img}
         return self.cache[ck]
 
@@ -543,6 +591,8 @@ def build(plan, palette):
         focal_trip = False
         for st in ps['strokes']:
             pts, s, *_ = geometry(st)
+            if st.get('flood'):               # anime: the hand slides along a slider while the adjustment eases in
+                pts, s = np.asarray(st['points'], float)[[0, -1]], np.array([0., st['flood']])
             fp = pts + [CX, CY]
             key = (pi, st['mix'])
             slow = 0.
@@ -577,6 +627,10 @@ def build(plan, palette):
             if need > feature_cap:
                 for e in others:
                     e['slow'] = base * need / feature_cap
+        nib_px = ps.get('nib_px', pace.get('nib_px'))       # anime plans cap the nib's travel per frame (see floor)
+        if nib_px:
+            for e in evs:
+                e['nib'] = (nib_px, ps.get('travel_px', pace.get('travel_px', nib_px)))
         if KIND[0] != 'oil' or ps.get('group'):       # oil: only passes the plan marks (v5 strands, edges...)
             evs = group_events(evs)
         timeline.append(evs)
@@ -783,7 +837,7 @@ def main():
         patches.pop(id(e), None)
 
     last_stroke_rgb = None
-    last_colour = [None]
+    last_colour, layer_now, knob = [None], ['rough'], [0.]
     tips = []
     for f in range(nframes):
         tf = f / FPS
@@ -800,13 +854,13 @@ def main():
         lift, partial, ppartial = 1., None, None
         k = e['kind']
         if k == 'stroke':
-            s_now = e['L'] * distance_fraction(tau, 'minjerk')
+            s_now = e['L'] * (even_fraction(tau) if e.get('nib') else distance_fraction(tau, 'minjerk'))
             tip = along(e['path'], e['s'], s_now)
             lift = 0.
             partial = advance(e, s_now) if 'group' in e else (ensure(e), s_now)
             paint_rgb = e['rgb']
         elif k in ('travel', 'enter', 'leave'):
-            u = distance_fraction(tau, 'minjerk')
+            u = even_fraction(tau) if e.get('nib') else distance_fraction(tau, 'minjerk')
             tip = bezier(np.asarray(e['a'], float), np.asarray(e['b'], float), u)
             lift = math.sin(math.pi * min(1., tau * 1.15)) ** .6 if k == 'travel' else 1.
         elif k == 'mix':
@@ -867,10 +921,15 @@ def main():
             frame[tray_y:tray_y + th, tray_x:tray_x + tw] = (region * (1 - m) + tray * m).astype(np.uint8)
         pil = Image.fromarray(frame)
         if swatches is not None:
-            cur = e['st']['rgb'] if e['kind'] == 'stroke' and e['st']['medium'] in ('cel', 'air') else last_colour[0]
-            if e['kind'] == 'stroke' and e['st']['medium'] in ('cel', 'air'):
+            st_now = e['st'] if e['kind'] == 'stroke' else {}
+            cur = st_now['rgb'] if st_now.get('medium') in ('cel', 'air') else last_colour[0]
+            if st_now.get('medium') in ('cel', 'air'):
                 last_colour[0] = cur
-            sw = swatches.image(cur)
+            if st_now and st_now['medium'] != 'adjust':
+                layer_now[0] = st_now.get('layer')
+            if st_now.get('medium') == 'adjust':
+                knob[0] = float(distance_fraction(tau, 'minjerk'))
+            sw = swatches.image(cur, layer_now[0], [n for n in hide_at if tf >= hide_at[n]], knob[0])
             pil.paste(sw, (tray_x, tray_y), sw)
         # pass label
         row = rows[label_of[min(e['pi'], len(label_of) - 1)]]
@@ -884,7 +943,7 @@ def main():
         tip_prev = tip
         strength = .6 if (paint_rgb is not None and e.get('st', {}).get('medium') == 'pencil') else .85
         frame = hand.draw(frame, tip, lift, paint_rgb if KIND[0] == 'oil' else None, angle, strength)
-        tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi'])])
+        tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi']), float(zoom[f])])
         header = frame[:HEADER + HEADER_FADE].astype(float) if zoom[f] > 1.001 else None
         frame = apply_camera(frame, zoom[f], cam_x[f], cam_y[f])
         if header is not None:     # in a close-up the title and pass labels stay put at their normal size, on paper
