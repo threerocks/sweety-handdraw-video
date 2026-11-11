@@ -34,6 +34,56 @@ from paint import (H, W, MEDIA, orientation, REGIONS, AREAS, FEATURES, EYE_FEATU
 from planes import GROUND, area_masks, outline_band, bare_holes, v2_spec, PRESETS
 
 CLIP_GROW, CLIP_FEATHER = 2.5, 1.5
+SHOW = [None]      # how much of the ground still shows at each pixel (the product of 1 - alpha of every stroke laid there)
+
+
+def put(st, canvas, height, thick, tooth):
+    """Lay a stroke and keep count of the ground it covers. (paint.thick saturates at a slit where two soft stroke
+    edges meet, each half covering: a quarter of the ground still shows there as a light hairline.)"""
+    patch = render(st, canvas, height, thick, tooth)
+    if patch is not None and SHOW[0] is not None:
+        SHOW[0][patch['gy'], patch['gx']] *= 1 - patch['alpha']
+    return patch
+
+
+def bare(where, min_px=4, level=.1):
+    """Pixels in where through which more than level of the ground shows; specks count when they cluster to min_px."""
+    m = where & (SHOW[0] > level)
+    if not m.any():
+        return m
+    comp, n = ndimage.label(ndimage.binary_dilation(m, iterations=1), np.ones((3, 3)))
+    sizes = ndimage.sum_labels(m.astype(float), comp, index=np.arange(1, n + 1))
+    return m & np.isin(comp, np.flatnonzero(sizes >= min_px) + 1)
+
+
+def seal(ref, canvas, height, thick, tooth, where, rng, tip, R=5., rounds=3, clip=None):
+    """Close every scrap of ground left in where (slits between strokes, dry-brush specks, rims, canvas borders) with
+    small loaded strokes in the target's colour there, nearest first. Returns the strokes."""
+    out = []
+    lab = rgb2lab(ndimage.gaussian_filter(ref, (1.5, 1.5, 0)))
+    tx, ty = orientation(lab[..., 0], 6., rng)
+    everywhere = np.ones((H, W), bool)
+    tip = np.asarray(tip, float)
+    for k in range(rounds):
+        holes = bare(where, 3 if k else 4)
+        if holes.sum() <= 4:
+            break
+        r = float(max(2.5, R * (.75 ** k)))
+        hm = ndimage.binary_dilation(holes, iterations=1)
+        ys, xs = np.nonzero(hm)
+        box = (ys.min(), ys.max() + 1, xs.min(), xs.max() + 1)
+        pool = fill_strokes(hm, box, r, tx, ty, lab, rng, np.zeros((H, W), bool), everywhere, reach=(1.5, 3.5), medium='bristle',
+                            rho=.8, dense=True, tip=tip, body=.5)
+        for st in pool:                                    # (fill_strokes already walks them nearest first)
+            st.update(press=(.95, .9), load=2.5, wobble=.3, pvar=.03, soft=.2)
+            st.pop('tone2', None)
+            if clip:
+                st['clip'] = clip
+            put(st, canvas, height, thick, tooth)
+            out.append(st)
+            tip = np.array(st['points'][-1])
+    return out
+
 
 
 def smooth_areas(ref=None):
@@ -183,7 +233,7 @@ def stroke_of(pts, R, colour_lab, mix, mix_lab, rng, medium, soft=0., light=Fals
 
 
 def fill_strokes(pm, box, R, tx, ty, lab, rng, cov, area, reach=(2.5, 6.), rho=1.25, medium='bristle', soft=0., mix=0,
-                 mix_lab=None, brk=11., tip=None, body=1.):
+                 mix_lab=None, brk=11., tip=None, body=1., dense=False):
     """Cover one plane (bool mask pm, bbox box) with strokes along the flow, laid side by side across it. A stroke may
     run on past the plane while the colour under it stays its own (a brush does not stop at a contour line of the
     model), inside the area; cov (the whole area's coverage so far) keeps later planes from repainting it."""
@@ -196,7 +246,7 @@ def fill_strokes(pm, box, R, tx, ty, lab, rng, cov, area, reach=(2.5, 6.), rho=1
     phi = math.atan2((2 * fx * fy).mean(), (fx * fx - fy * fy).mean()) / 2
     u = np.array([math.cos(phi), math.sin(phi)])
     v = np.array([-u[1], u[0]])
-    step = max(2, int(R / 2.5))
+    step = 1 if dense else max(2, int(R / 2.5))
     grid = (ys % step == 0) & (xs % step == 0)
     if not grid.any():
         grid = np.zeros(len(ys), bool)
@@ -363,7 +413,7 @@ def form_strokes(ref, canvas, height, thick, tooth, area, mask, R, k, rng, T=0.,
 
     def lay(st):
         st['clip'] = area
-        render(st, canvas, height, thick, tooth)
+        put(st, canvas, height, thick, tooth)
         strokes.append(st)
 
     while todo:
@@ -437,19 +487,19 @@ def form_strokes(ref, canvas, height, thick, tooth, area, mask, R, k, rng, T=0.,
                     keepf.append(st)
             fill = keepf
         def close(where, tip):
-            holes = bare_holes(where, thick, min_px=5)
-            if holes.sum() <= 12:
+            holes = bare(where, 4)
+            if holes.sum() <= 6:
                 return tip
-            hm = ndimage.binary_dilation(holes, iterations=2) & pm
+            hm = ndimage.binary_dilation(holes, iterations=1) & pm
             pool = fill_strokes(hm, box, float(max(4., Rp * .6)), tx, ty, lab, rng, np.zeros((H, W), bool), reachable,
-                                reach=(1.5, 3.5), medium=medium, soft=soft, mix=mix, mix_lab=mix_lab, rho=1.)
+                                reach=(1.5, 3.5), medium=medium, soft=soft, mix=mix, mix_lab=mix_lab, rho=.9, dense=True)
             while pool:                                    # nearest first: the hand does not hop about for specks
                 k_ = int(np.argmin([min(np.hypot(*(np.array(s_['points'][0]) - tip)), np.hypot(*(np.array(s_['points'][-1]) - tip)))
                                     for s_ in pool]))
                 s_ = pool.pop(k_)
                 if np.hypot(*(np.array(s_['points'][-1]) - tip)) < np.hypot(*(np.array(s_['points'][0]) - tip)):
                     s_['points'] = s_['points'][::-1]
-                s_['press'] = (.9, .8)
+                s_.update(press=(.95, .9), load=2.5)
                 lay(s_)
                 tip = np.array(s_['points'][-1])
             return tip
@@ -727,6 +777,8 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
     np.save(out / 'tooth.npy', tooth.astype(np.float32))
     canvas = np.tile(GROUND, (H, W, 1))
     height, thick = np.zeros((H, W)), np.zeros((H, W))
+    SHOW[0] = np.ones((H, W))
+    blocked = np.zeros((H, W), bool)                       # the areas whose block-in is done
     focus = focus_map(focus_ellipses, .35)
     FEATURES[:] = [tuple(e[:4]) for e in focus_ellipses if e[4] >= .95]
     LINE_FEATURES[:] = [tuple(e[:4]) for e in focus_ellipses if e[4] >= .999]
@@ -747,7 +799,10 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
     contours = {}
     for name in {a['area'] for _, _, kind, a, _ in STEPS_V5 if kind == 'forms'}:
         d = ndimage.distance_transform_edt(~AREAS[name])
-        paint.CLIPS[name] = np.clip(1 - (d - CLIP_GROW) / CLIP_FEATHER, 0, 1).astype(np.float32)
+        # how far an area's strokes may run over its neighbours: the background, painted last and light, only just
+        # (a light rim over dark hair reads as a sliver of bare canvas); any seam left is sealed
+        grow = {'bg': .8, 'clothes': 1.5}.get(name, CLIP_GROW)
+        paint.CLIPS[name] = np.clip(1 - (d - grow) / CLIP_FEATHER, 0, 1).astype(np.float32)
         Image.fromarray((paint.CLIPS[name] * 255).astype(np.uint8)).save(out / f'clip-{name}.png')
         contours[name] = trace_contours(AREAS[name])
     # hair strands may leave the (smoothed) hair area only onto what the target paints as hair: wisps of a fringe on the
@@ -760,6 +815,7 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
     strand = ndimage.gaussian_filter(strand.astype(np.float32), 1.2) > .5
     paint.CLIPS['strand'] = np.clip(1 - (ndimage.distance_transform_edt(~strand) - .5) / 1.5, 0, 1).astype(np.float32)
     Image.fromarray((paint.CLIPS['strand'] * 255).astype(np.uint8)).save(out / 'clip-strand.png')
+    lab_t = rgb2lab(ndimage.gaussian_filter(ref, (1., 1., 0)))
     passes = []
     started = time.time()
 
@@ -771,7 +827,7 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
 
     def run(name, label, strokes, budget):
         for st in strokes:
-            render(st, canvas, height, thick, tooth)
+            put(st, canvas, height, thick, tooth)
         return record(name, label, strokes, budget)
 
     sketch = sketch_strokes(sketch_path, shape, crop, rng) if sketch_path else []
@@ -810,40 +866,49 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
             mask = ndimage.binary_erosion(AREAS[area], iterations=int(max(3, a['R'] * .6))) if a.get('T') else AREAS[area]
             strokes = form_strokes(ref, canvas, height, thick, tooth, area, mask, rng=rng, start_tip=tip,
                                    contours=contours.get(area), deep=deep, **a)
-            if not a.get('T'):                             # safety net: nothing bare is left inside the area
-                holes = bare_holes(ndimage.binary_erosion(AREAS[area], iterations=2), thick, min_px=6)
-                if holes.sum() > 30:
-                    fill = planes.plane_strokes(ref, canvas, holes, R=max(4., a['R'] * .3), k=2, rng=rng,
-                                                start_tip=strokes[-1]['points'][-1] if strokes else tip, medium='bristle',
-                                                spacing=1.1, fill=True)
-                    for st in fill:
-                        st['clip'] = area
-                        render(st, canvas, height, thick, tooth)
-                    strokes += fill
-                    print(f'{"":10s} +{len(fill)} strokes fill {int(holes.sum())} bare px', flush=True)
+            if not a.get('T'):
+                # the area is done: no ground shows inside it (slits between strokes, dry-brush specks, its rim, the
+                # canvas border), nor in the seam between it and the areas painted before
+                end = strokes[-1]['points'][-1] if strokes else tip
+                extra = seal(ref, canvas, height, thick, tooth, AREAS[area], rng, end, R=max(4., a['R'] * .25), clip=area)
+                blocked |= AREAS[area]
+                seam = ndimage.binary_closing(blocked, iterations=4) & ~blocked
+                seam[:4], seam[-4:], seam[:, :4], seam[:, -4:] = False, False, False, False
+                extra += seal(ref, canvas, height, thick, tooth, seam, rng, extra[-1]['points'][-1] if extra else end, R=3.5)
+                strokes += extra
+                print(f'{"":10s} +{len(extra)} strokes seal; ground still showing in the area: {int(bare(AREAS[area], 1).sum())} px', flush=True)
             tip = record(name, label, strokes, budget) or tip
             if os.environ.get("V5_STOP") == name:        # debugging: plan only up to this pass
                 break
             continue
         first = []
         if name == 'edges':                                # before the edges are worked: no ground left anywhere
-            holes = bare_holes(np.ones((H, W), bool), thick, min_px=6)
+            first = seal(ref, canvas, height, thick, tooth, np.ones((H, W), bool), rng, tip, R=4.)
             if pencil is not None:                         # a pencil line still showing through thin paint
                 off = np.linalg.norm(rgb2lab(canvas) - rgb2lab(ref), axis=-1) > 7
                 dark = (canvas.mean(-1) < ref.mean(-1) - .035) & (ref.mean(-1) > .45)
-                holes |= ndimage.binary_dilation(pencil & off & dark, iterations=1)
-            if holes.sum() > 20:
-                first = planes.plane_strokes(ref, canvas, holes, R=5., k=3, rng=rng, start_tip=tip, medium='bristle',
-                                             spacing=1.1, fill=True)
-                for st in first:
-                    render(st, canvas, height, thick, tooth)
-                print(f'{"":10s} +{len(first)} strokes close {int(holes.sum())} bare px', flush=True)
-        strokes = first + plan_layer(args, ref, canvas, focus, rng, first[-1]['points'][-1] if first else tip)
+                holes = ndimage.binary_dilation(pencil & off & dark, iterations=1)
+                if holes.sum() > 20:
+                    more = planes.plane_strokes(ref, canvas, holes, R=5., k=3, rng=rng, start_tip=first[-1]['points'][-1] if first else tip,
+                                                medium='bristle', spacing=1.1, fill=True)
+                    for st in more:
+                        put(st, canvas, height, thick, tooth)
+                    first += more
+            print(f'{"":10s} +{len(first)} strokes close; ground still showing anywhere: {int(bare(np.ones((H, W), bool), 1).sum())} px', flush=True)
+        planned = plan_layer(args, ref, canvas, focus, rng, first[-1]['points'][-1] if first else tip)
+        # a fine stroke must not land lighter than the target under it (its colour is read a brush width away: on a
+        # dark passage beside a light one that is a light speck)
+        kept = []
+        for st in planned:
+            gi = np.clip(np.rint(catmull(st['points'], step=2.)).astype(int), 0, [W - 1, H - 1])
+            if rgb2lab(np.array(st['rgb'])[None])[0, 0] - np.median(lab_t[gi[:, 1], gi[:, 0], 0]) <= 7:
+                kept.append(st)
+        strokes = first + kept
         if args.get('area') == 'hair':
             for st in strokes:
                 st['clip'] = 'strand'
         for st in strokes[len(first):]:
-            render(st, canvas, height, thick, tooth)
+            put(st, canvas, height, thick, tooth)
         tip = record(name, label, strokes, budget) or tip
         if name == 'eyefine':
             if sketch:
@@ -887,3 +952,66 @@ def plan_v5(subject_path, sketch_path, out, focus_ellipses, signature=None, eyes
     (out / 'plan.json').write_text(json.dumps(dict(W=W, H=H, passes=passes, focus=focus_ellipses, face=list(REGIONS['face']),
                                                    ground=GROUND.tolist(), style='v5', preset=PRESET, pace=PACE_V5), ensure_ascii=False))
     return passes
+
+
+# ------------------------------------------------------------------------------------------- 漏涂 check
+AREA_VIS = {'skin': (.95, .7, .55), 'hair': (.35, .2, .1), 'clothes': (.3, .4, .8), 'bg': (.85, .85, .85)}
+BLOCKED_BY = {'skin': 'face', 'hair': 'hair', 'clothes': 'clothes', 'bg': 'background'}   # the pass that completes an area
+
+
+def bare_map(img, target, ground, painted):
+    """Pixels that read as 漏涂 inside painted areas, as two masks: (a) still about the ground's colour where the target
+    is not, and (b) a speck or hairline much lighter than what surrounds it where the target has no such light nearby
+    (thin paint over the ground, but also a lit ridge of impasto or a highlight laid lighter than the target). img, target: HxWx3
+    in 0..1; painted: bool mask of the areas whose block-in is done."""
+    lab = rgb2lab(img)
+    g = rgb2lab(np.asarray(ground, float)[None, None])[0, 0]
+    tsm = rgb2lab(ndimage.gaussian_filter(target, (1.2, 1.2, 0)))
+    # the target a few pixels around counts too: strokes need not sit on the target's edges to the pixel
+    far = ndimage.minimum_filter(np.linalg.norm(tsm - g, axis=-1), 9) > 16
+    as_ground = (np.linalg.norm(lab - g, axis=-1) < 9) & far
+    L, T = lab[..., 0], tsm[..., 0]
+    speck = (L - ndimage.median_filter(L, 13) > 10) & (L > ndimage.maximum_filter(T, 9) + 6)
+    return as_ground & painted, speck & painted & ~as_ground
+
+
+def bare_report(run_dir, mark=None):
+    """Per pass: 漏涂 pixels and connected specks (2 px or more) inside the areas already blocked in. Prints a table
+    and returns the rows; with mark (a file name), saves the lit final with every find circled."""
+    d = Path(run_dir)
+    plan = json.loads((d / 'plan.json').read_text())
+    target = np.asarray(Image.open(d / 'target.png').convert('RGB'), float) / 255
+    vis = np.asarray(Image.open(d / 'areas.png').convert('RGB'), float) / 255
+    names = list(AREA_VIS)
+    lbl = np.argmin([((vis - np.array(AREA_VIS[n])) ** 2).sum(-1) for n in names], 0)
+    masks = {n: lbl == k for k, n in enumerate(names)}
+    painted = np.zeros(vis.shape[:2], bool)
+    rows = []
+    files = [(f'pass-{i + 1:02d}-{p["name"]}.png', p['name']) for i, p in enumerate(plan['passes'])]
+    files += [('final-flat.png', 'final (flat)'), ('final.png', 'final (lit)')]
+    for fname, name in files:
+        for a, p in BLOCKED_BY.items():
+            if name == p:
+                painted |= masks[a]
+        if not painted.any() or not (d / fname).exists():
+            continue
+        img = np.asarray(Image.open(d / fname).convert('RGB'), float) / 255
+        ga, sp = bare_map(img, target, plan['ground'], painted)
+        row = [name]
+        for m in (ga, sp):
+            comp, n = ndimage.label(m, np.ones((3, 3)))
+            sizes = ndimage.sum_labels(np.ones(m.shape), comp, index=np.arange(1, n + 1)) if n else np.zeros(1)
+            row += [int(m.sum()), int((sizes >= 2).sum())]
+        rows.append(tuple(row))
+        print(f'{name:14s} ground-coloured px {row[1]:5d} in {row[2]:4d} specks   |   lighter-than-target px {row[3]:5d} in {row[4]:4d} specks', flush=True)
+        if mark and name == 'final (lit)':
+            out = (img * 255).astype(np.uint8)
+            for m, c in ((sp, (0, 255, 255)), (ga, (255, 0, 255))):
+                out[ndimage.binary_dilation(m, iterations=5) & ~ndimage.binary_dilation(m, iterations=3)] = c
+            Image.fromarray(out).save(mark)
+    return rows
+
+
+if __name__ == '__main__':
+    import sys
+    bare_report(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
