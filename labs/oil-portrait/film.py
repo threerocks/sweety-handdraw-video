@@ -120,11 +120,26 @@ def floor(e):
     d = e.get('dist', 0.)
     if e['kind'] == 'travel' and d > JUMP:
         return 1.875 * d / (HAND_PX * FPS)
+    if e['kind'] == 'tool':                        # sketch: down to the tools, a beat to swap, never a jump cut
+        return 1.875 * d / (HAND_PX * FPS) + .2
     if e['kind'] == 'mix' and e.get('trip'):
         return 1.875 * d / (HAND_PX * FPS) * e['real'] / max(1e-6, e['go'])   # the outbound move gets go/real of it
+    if e['kind'] == 'stroke' and KIND[0] == 'sketch':
+        # a sketch is thousands of short marks: however fast the lapse, the pencil must be seen making them. One frame
+        # shows at most SKETCH_MARKS strokes of one hatching motion, and a long stroke crosses at most SKETCH_PX
+        return max(e.get('floorL', e['L']) / SKETCH_PX, len(e.get('group', (0,))) / SKETCH_MARKS) / FPS
     if e['kind'] == 'stroke' and e.get('floorL', e['L']) > 200:
         return 1.875 * e.get('floorL', e['L']) / (STROKE_PX * FPS)
     return 0.
+
+
+SKETCH_PX = 340.        # sketch: the longest stroke of a motion travels at most this far in one frame
+SKETCH_MARKS = 26.      # sketch: strokes of one hatching motion laid in one frame at most
+# sketch: the hand puts one tool down and picks up another at the tools laid out below the board (frame px), and is
+# drawn holding it (a sidecar-calibrated asset each); a stroke's medium says which tool lays it
+TOOL_OF = {'graphite': 'pencil', 'stump': 'stump', 'eraser': 'eraser'}
+TOOL_SPOTS = {'pencil': (205., 1703.), 'stump': (414., 1721.), 'eraser': (613., 1729.)}
+TOOL_HANDS = {'stump': HERE / 'src' / 'hand-tang-stump.png', 'eraser': HERE / 'src' / 'hand-tang-eraser.png'}
 
 
 GROUP_HOP = 90.         # sketch/anime: a lift shorter than this between strokes is part of one hatching motion
@@ -537,8 +552,9 @@ def build(plan, palette):
     eye_life = {n: v * k for n, v in pace.get('eye_life', {}).items()}
     tip = np.array([FW + 200., FH + 300.])
     timeline = []
+    tool = 'pencil'
     for pi, ps in enumerate(passes):
-        evs = [dict(kind='pause', real=(1.2 if pi else .6) * min(1., k * 1.5), pi=pi)]
+        evs = [dict(kind='pause', real=(1.2 if pi else .6) * min(1., k * 1.5) * pace.get('pause', 1.), pi=pi)]
         last_key = None
         focal_trip = False
         for st in ps['strokes']:
@@ -558,6 +574,9 @@ def build(plan, palette):
                 focal_trip = focal_trip or bool(slow and first)
                 evs.append(dict(kind='mix', pi=pi, rgb=st['mix_rgb'], first=first, real=0., slow=slow))
                 last_key = key
+            if KIND[0] == 'sketch' and TOOL_OF.get(st['medium'], tool) != tool:
+                tool = TOOL_OF[st['medium']]
+                evs.append(dict(kind='tool', pi=pi, tool=tool, b=np.array(TOOL_SPOTS[tool]), real=0., slow=0.))
             evs.append(dict(kind='travel', pi=pi, b=fp[0].copy(), real=0., slow=slow))
             evs.append(dict(kind='stroke', pi=pi, st=st, path=fp, s=s, L=float(s[-1]), real=stroke_seconds(st, s[-1]) + .08 * bool(slow),
                             rgb=st["rgb"], slow=slow, focal=bool(slow)))
@@ -606,6 +625,10 @@ def build(plan, palette):
                     cur = sp[-1].copy()
                 else:
                     e['real'] = 0.
+            elif e['kind'] == 'tool':
+                e['dist'] = np.linalg.norm(e['b'] - cur)
+                e['real'] = travel_seconds(e['dist']) + .3
+                cur = e['b'].copy()
             elif e['kind'] == 'travel':
                 d = np.linalg.norm(e['b'] - cur)
                 e['dist'] = d
@@ -674,6 +697,10 @@ def main():
     palette = Palette(rng)
     default_hand = {'sketch': HERE / 'src' / 'hand-tang-pencil.png', 'anime': HERE / 'src' / 'hand-tang-stylus.png'}
     hand = Hand(args.hand or default_hand.get(KIND[0], HAND))
+    hands = {'pencil': hand}
+    if KIND[0] == 'sketch' and not args.hand:
+        hands.update({k: Hand(p) for k, p in TOOL_HANDS.items() if p.exists()})
+    held = 'pencil'
     labels = list(dict.fromkeys(p['label'] for p in plan['passes']))     # passes sharing a name share one label
     label_of = [labels.index(p['label']) for p in plan['passes']] + [len(labels)]
     rows = [pass_row(labels, k) for k in range(len(labels) + 1)]
@@ -794,6 +821,8 @@ def main():
                 last_stroke_rgb = e['rgb']
             if e['kind'] == 'mix':
                 paint_rgb = e['rgb']
+            if e['kind'] == 'tool':
+                held = e['tool']
             ei += 1
         e = events[ei] if ei < len(events) else events[-1]
         tau = 0. if e['video'] <= 0 else np.clip((tf - e['v0']) / e['video'], 0, 1)
@@ -805,7 +834,7 @@ def main():
             lift = 0.
             partial = advance(e, s_now) if 'group' in e else (ensure(e), s_now)
             paint_rgb = e['rgb']
-        elif k in ('travel', 'enter', 'leave'):
+        elif k in ('travel', 'enter', 'leave', 'tool'):
             u = distance_fraction(tau, 'minjerk')
             tip = bezier(np.asarray(e['a'], float), np.asarray(e['b'], float), u)
             lift = math.sin(math.pi * min(1., tau * 1.15)) ** .6 if k == 'travel' else 1.
@@ -883,7 +912,7 @@ def main():
         angle += (target - angle) * .35
         tip_prev = tip
         strength = .6 if (paint_rgb is not None and e.get('st', {}).get('medium') == 'pencil') else .85
-        frame = hand.draw(frame, tip, lift, paint_rgb if KIND[0] == 'oil' else None, angle, strength)
+        frame = hands.get(held, hand).draw(frame, tip, lift, paint_rgb if KIND[0] == 'oil' else None, angle, strength)
         tips.append([float(tip[0]), float(tip[1]), float(lift), e['kind'], int(e['pi'])])
         header = frame[:HEADER + HEADER_FADE].astype(float) if zoom[f] > 1.001 else None
         frame = apply_camera(frame, zoom[f], cam_x[f], cam_y[f])
