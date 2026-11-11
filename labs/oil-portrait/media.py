@@ -160,10 +160,11 @@ def graphite(stroke, canvas):
     p = pressure_along(stroke, f)
     soft, ceil = GRADES[stroke.get('grade', 'HB')]
     g = GRAIN[f['gy'], f['gx']]
-    grain = np.clip(1 + (.3 if side else .45) * (g - .5) * 2 * (1 - .85 * p), .1, 2.)
-    d = np.clip(soft * p * grain, 0, 1) * clipped(stroke, f, prof)
     ground = PAPER[f['gy'], f['gx']]
     c = coverage(canvas[f['gy'], f['gx']], ground)
+    # the paper's grain shows under a light touch on bare paper; under heavy graphite its valleys are already full
+    grain = np.clip(1 + (.3 if side else .45) * (g - .5) * 2 * (1 - .85 * p) * (1 - .8 * c), .1, 2.)
+    d = np.clip(soft * p * grain, 0, 1) * clipped(stroke, f, prof)
     c2 = np.maximum(c, np.minimum(ceil, 1 - (1 - c) * (1 - d)))
     return patch_of(f, (c2 > c + 1e-4) * np.clip(prof * 4, 0, 1), tone(c2, ground))
 
@@ -178,7 +179,8 @@ def stump(stroke, canvas):
     reach = max(2., stroke['R'] * stroke.get('spread', .5))     # how far graphite is dragged along the stroke
     pad = int(reach * 2) + 3
     ya, yb, xa, xb = max(0, y0 - pad), min(canvas.shape[0], y1 + pad), max(0, x0 - pad), min(canvas.shape[1], x1 + pad)
-    box = ndimage.gaussian_filter(canvas[ya:yb, xa:xb], (.8, .8, 0))
+    cross = stroke.get('cross', .8)               # a tissue also evens the tone a little across its path
+    box = ndimage.gaussian_filter(canvas[ya:yb, xa:xb], (cross, cross, 0))
     # a stump drags graphite the way it moves: the tone is averaged along the stroke far more than across it, so
     # a rubbed passage keeps soft streaks in the stroke's direction instead of going out of focus
     tan = np.gradient(f['path'], axis=0)
