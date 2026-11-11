@@ -727,6 +727,36 @@ def bezier(a, b, u, lift=.12):
     return (1 - u) ** 2 * a + 2 * (1 - u) * u * c + u ** 2 * b
 
 
+OUTRO = 6.             # the ending: the hand is gone and the finished picture is shown, with a slow push-in, then held
+OUTRO_PUSH = (1.05, 3.)   # how far the camera moves in on the finished picture, over how many seconds
+COVER_HOLD = .5        # the opening cover (the finished picture) is shown this long,
+COVER_FADE = 5         # then gives way to the empty canvas over this many frames (about .17 s)
+ENCODE = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-pix_fmt', 'yuv420p']
+
+
+def with_cover(body, cover, first, out_path):
+    """Put the opening cover in front of the film: the cover held, a short dissolve into the film's first frame, then
+    the film itself (stream copy: the cover clip is encoded with the same settings)."""
+    head = body.with_name(body.stem + '-cover.mp4')
+    ff = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{FW}x{FH}', '-r', str(FPS),
+                           '-i', '-', *ENCODE, str(head)], stdin=subprocess.PIPE)
+    a, b = cover.astype(float), first.astype(float)
+    for _ in range(int(round(COVER_HOLD * FPS))):
+        ff.stdin.write(cover.tobytes())
+    for i in range(1, COVER_FADE + 1):
+        u = i / (COVER_FADE + 1)
+        u = u * u * (3 - 2 * u)
+        ff.stdin.write((a * (1 - u) + b * u).astype(np.uint8).tobytes())
+    ff.stdin.close()
+    ff.wait()
+    lst = body.with_name(body.stem + '-concat.txt')
+    lst.write_text(f"file '{head.resolve()}'\nfile '{body.resolve()}'\n")
+    subprocess.run(['ffmpeg', '-v', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', str(lst), '-c', 'copy',
+                    '-movflags', '+faststart', str(out_path)], check=True)
+    for p in (head, lst, body):
+        p.unlink()
+
+
 def along(path, s, target):
     i = int(np.clip(np.searchsorted(s, target), 1, len(s) - 1))
     f = (target - s[i - 1]) / max(1e-9, s[i] - s[i - 1])
@@ -740,7 +770,9 @@ def main():
     ap.add_argument('--stills', type=float, default=2.)
     ap.add_argument('--until', type=float, default=None)
     ap.add_argument('--intro', type=float, default=1.2)
-    ap.add_argument('--outro', type=float, default=3.5)
+    ap.add_argument('--outro', type=float, default=OUTRO, help='seconds the finished picture is shown after the hand leaves')
+    ap.add_argument('--cover', default=None, help="opening cover: an image the size of a film frame, or 'none'; default: "
+                    "the film's own last frame (the finished picture)")
     ap.add_argument('--length', type=float, default=None, help='fit the film to about this many seconds (a short cut)')
     ap.add_argument('--hand', default=None, help='transparent hand asset (optional sidecar .json: nib, scale); default: '
                     'the brush hand for oil, the pencil hand for a sketch, the stylus hand for anime')
@@ -811,13 +843,27 @@ def main():
     zoom, cam_x, cam_y, spans = camera_track(events, nframes, (CX + face[0] * W, CY + face[1] * H))
     header_mask = np.r_[np.ones(HEADER), np.linspace(1, 0, HEADER_FADE)][:, None] * np.ones((1, FW))
     print('close-ups', [(round(a, 1), round(b, 1)) for a, b in spans if b - a >= 1.5])
+    # the ending: once the hand is gone the camera moves in a little on the finished picture and rests there
+    f0 = int(events[-1]['v0'] * FPS)
+    for f in range(f0, nframes):
+        u = np.clip((f - f0) / (OUTRO_PUSH[1] * FPS), 0, 1)
+        u = u * u * (3 - 2 * u)
+        if zoom[f] <= 1.001:
+            zoom[f], cam_x[f], cam_y[f] = 1 + (OUTRO_PUSH[0] - 1) * u, CX + W / 2, CY + H / 2
 
     out_path = Path(args.out) if args.out else d / 'film.mp4'
+    cover = None                                     # the opening cover: given, or the last frame of this film
+    if args.cover and args.cover != 'none':
+        cover = np.asarray(Image.open(args.cover).convert('RGB').resize((FW, FH), Image.LANCZOS))
+    elif args.cover is None and args.until is not None and (d / 'last-frame.png').exists():
+        cover = np.asarray(Image.open(d / 'last-frame.png').convert('RGB'))     # a partial render: the full film's
+    want_cover = args.cover != 'none' and (cover is not None or args.until is None)
+    body_path = out_path.with_name(out_path.stem + '-body.mp4') if want_cover else out_path
+    first_frame = None
     stills = d / 'stills'
     stills.mkdir(exist_ok=True)
     ff = subprocess.Popen(['ffmpeg', '-v', 'error', '-y', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-s', f'{FW}x{FH}', '-r', str(FPS),
-                           '-i', '-', '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-pix_fmt', 'yuv420p',
-                           '-movflags', '+faststart', str(out_path)], stdin=subprocess.PIPE)
+                           '-i', '-', *ENCODE, '-movflags', '+faststart', str(body_path)], stdin=subprocess.PIPE)
     surf = make_surface(plan, d, tooth)              # oil: a toned canvas (v4: no wash pass); sketch: paper; anime: layers
     swatches = Swatches() if KIND[0] == 'anime' else None
     hide_at = {}                                     # anime: a layer hidden when a pass starts (the rough sketch)
@@ -987,13 +1033,18 @@ def main():
             frame[:HEADER + HEADER_FADE] = (top * (1 - k) + header * k).astype(np.uint8)
         frame = (frame * (1 - wm_alpha) + wm_rgb * wm_alpha).astype(np.uint8)
         ff.stdin.write(frame.tobytes())
+        if first_frame is None:
+            first_frame = frame.copy()
         if args.stills and f % int(args.stills * FPS) == 0:
             Image.fromarray(frame).save(stills / f'{f:05d}.jpg', quality=88)
         if f % 150 == 0:
             print(f'frame {f}/{nframes}  {time.time() - started:.0f}s', flush=True)
     ff.stdin.close()
     ff.wait()
-    Image.fromarray(frame).save(d / 'last-frame.png')
+    if args.until is None:
+        Image.fromarray(frame).save(d / 'last-frame.png')
+    if want_cover:
+        with_cover(body_path, cover if cover is not None else frame, first_frame, out_path)
     (d / 'tips.json').write_text(json.dumps(tips))
     print('wrote', out_path, f'{time.time() - started:.0f}s')
 
