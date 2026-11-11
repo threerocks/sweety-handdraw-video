@@ -156,7 +156,8 @@ def pencil(pts, p, R, rng, grade, pmin, pmax, **kw):
     pp = np.clip(resample(p, int(np.clip(L / 5, 2, 24))), pmin * .6, pmax)
     if kw.get('side'):          # the side of the lead is laid down and lifted off gradually: no blunt ends
         u = np.linspace(0, 1, len(pp))
-        pp = pp * np.clip(np.minimum(u, 1 - u) / .22, .12, 1.) ** .8
+        lo = .12 if L > 8 * R else .6            # a short touch of the side of the lead is laid down whole
+        pp = pp * np.clip(np.minimum(u, 1 - u) / .22, lo, 1.) ** .8
     else:                       # a hand never presses two strokes alike
         pp = np.clip(pp * rng.uniform(.86, 1.14), pmin * .6, pmax)
     return stroke(pts[keep], R * rng.uniform(.92, 1.08), 'graphite', rng, grade=grade, pp=pp, **kw)
@@ -180,7 +181,7 @@ def strand_flow(v, grad=1., rho=9.):
 
 # ----------------------------------------------------------------------------------------------- hatching
 def bands(goal, mask, active, rng, tip, *, grade, R, spacing, angle, length, sigma, smooth, gain, pmin, pmax, min_len,
-          clip, bow, side, focal, jitter, f, soft, bridge=0.):
+          clip, bow, side, focal, jitter, f, soft, bridge=0., floor_c=0):
     """One direction of hatching laid the way a hand does it: a band of parallel strokes, each about `length` long,
     advancing sideways across the area, back and forth; then the next band beside it, its ragged ends meshing with
     the last one's. The sheet is read again before every band."""
@@ -200,7 +201,7 @@ def bands(goal, mask, active, rng, tip, *, grade, R, spacing, angle, length, sig
         if sel.sum() < 12:
             continue
         b_lo, b_hi = Bc[sel].min(), Bc[sel].max()
-        C = ndimage.gaussian_filter(cov(), sigma)
+        C = ndimage.gaussian_filter(ndimage.minimum_filter(cov(), size=floor_c) if floor_c else cov(), sigma)
         N = ndimage.gaussian_filter(goal, sigma) - C
         offs = []
         o = b_lo + rng.uniform(0, spacing)
@@ -244,7 +245,7 @@ def bands(goal, mask, active, rng, tip, *, grade, R, spacing, angle, length, sig
 
 def hatch(goal, mask, rng, tip, *, grade='HB', R=1., spacing=4., angle=FLICK, flow=None, patch=(56, 96), sigma=None,
           smooth=9., gain=.85, pmin=.12, pmax=1., min_len=7., clip=None, bow=.05, side=False, thr=.025, focal=None,
-          jitter=5., step=.7, bridge=0.):
+          jitter=5., step=.7, bridge=0., floor_c=0):
     """Hatching in patches, each a set of parallel, slightly bowed lines laid back and forth, patch next to patch.
     The pressure along every line follows how much tone this layer still wants there (smoothed over `smooth` px); the
     pencil lifts where none is wanted. With flow, each patch takes the direction of the form at its centre."""
@@ -252,7 +253,7 @@ def hatch(goal, mask, rng, tip, *, grade='HB', R=1., spacing=4., angle=FLICK, fl
     soft = GRADES[grade][0]
     ADV[0] = spacing
     f = min(1., 2 * R * (.75 if side else 1.) / spacing)
-    need = ndimage.gaussian_filter(goal - cov(), sigma)
+    need = ndimage.gaussian_filter(goal - (ndimage.minimum_filter(cov(), size=floor_c) if floor_c else cov()), sigma)
     active = mask & (need > thr)
     if active.sum() < 30:
         return []
@@ -260,7 +261,7 @@ def hatch(goal, mask, rng, tip, *, grade='HB', R=1., spacing=4., angle=FLICK, fl
     if flow is None:
         return bands(goal, mask, active, rng, tip, grade=grade, R=R, spacing=spacing, angle=angle, length=float(np.mean(patch)),
                      sigma=sigma, smooth=smooth, gain=gain, pmin=pmin, pmax=pmax, min_len=min_len, clip=clip, bow=bow,
-                     side=side, focal=focal, jitter=jitter, f=f, soft=soft, bridge=bridge)
+                     side=side, focal=focal, jitter=jitter, f=f, soft=soft, bridge=bridge, floor_c=floor_c)
     st_ = float(np.mean(patch)) * step
     centres = []
     for j, gy in enumerate(np.arange(ys.min() + st_ * .3, ys.max() + st_ * .6, st_)):
@@ -399,14 +400,16 @@ def sections(lines, tip, section):
 
 def strands(goal, mask, flow, rng, tip, *, grade='4B', R=1.2, spacing=3.2, length=(30, 170), sigma=None, smooth=6.,
             gain=.85, pmin=.12, pmax=1., clip=None, side=False, thr=.025, down=True, section=170., eraser=False,
-            opacity=.8, min_len=10., step=3., focal=None, grow=None, bridge=0.):
+            opacity=.8, min_len=10., step=3., focal=None, grow=None, bridge=0., floor_c=0):
     """Long lines along a flow field (hair drawn strand by strand, section by section; ribs of a knit). The pressure
-    along each follows the tone still wanted under it. eraser=True: an eraser pen lifting what is too dark."""
+    along each follows the tone still wanted under it. eraser=True: an eraser pen lifting what is too dark.
+    floor_c: read the sheet by its lightest spots within that many px (a pass that closes gaps presses for the
+    gaps, not for the average)."""
     sigma = sigma or max(1., spacing * .8)
     ADV[0] = spacing if R < 3 else None
     soft = 1. if eraser else GRADES[grade][0]
     f = min(1., 2 * R * (.75 if side else 1.) / spacing)
-    C = ndimage.gaussian_filter(cov(), sigma)
+    C = ndimage.gaussian_filter(ndimage.minimum_filter(cov(), size=floor_c) if floor_c else cov(), sigma)
     G = ndimage.gaussian_filter(goal, sigma)
     N = (C - G) if eraser else (G - C)
     active = mask & (N > thr)
@@ -472,7 +475,72 @@ def touch_up(goal, region, rng, tip, *, grade='2B', thr=.14, min_px=5):
     return out
 
 
-def scrub(mask, rng, tip, *, R, length, flow, opacity, step=None, clip=None, medium='stump', excess=None, spread=None):
+def glaze(goal, mask, flow, rng, tip, *, grade, R, spacing=None, floor_c=5, thr=.05, pmax=.6, gain=.9, clip=None,
+          length=(30, 260), section=220., down=True, min_len=14.):
+    """Close an area: the side of the lead drawn over what is there, stroke lapping stroke, pressed for the
+    lightest spots under it. Graphite adds most where the paper still shows, so pinholes and the slits between
+    lines fill in while the lines stay. Laid right after a layer, inside the same step."""
+    return strands(goal, mask, flow, rng, tip, grade=grade, R=R, spacing=spacing or R * .95, length=length, smooth=R * 3,
+                   sigma=max(1.2, R * .35), gain=gain, pmin=.05, pmax=pmax, clip=clip, side=True, thr=thr, down=down,
+                   section=section, min_len=min_len, bridge=R * 3, floor_c=floor_c, grow=max(2, int(R)))
+
+
+def closing_goal(goal, drop=.04):
+    """What a closing pass aims at: the layer's goal, and nowhere much lighter than the tone already around (the
+    sheet's own 15 px median), except where the finished drawing itself is light there (a highlight stays)."""
+    q = lambda a: (np.clip(a, 0, 1) * 255).astype(np.uint8)
+    around = ndimage.median_filter(q(cov()), 15) / 255.
+    drawn_light = ndimage.gaussian_filter(CT, 1.) < ndimage.median_filter(q(CT), 15) / 255. - .05
+    return np.where(drawn_light, goal, np.maximum(goal, around - drop))
+
+
+def close_spots(region, flow, rng, tip, *, grade='4B', clip=None, lift=.085, rounds=2, max_px=260, focal=None):
+    """Look the area over for missed spots (pinholes, slits between lines: paper or a paler tone showing where the
+    tone around is darker and the finished drawing is not light) and touch each one in: one short stroke of the
+    point along the form, as wide as the gap, pressed to the tone around it. The same test as holes.py."""
+    ADV[0] = None
+    soft = GRADES[grade][0]
+    q = lambda a: (np.clip(a, 0, 1) * 255).astype(np.uint8)
+    drawn_light = ndimage.gaussian_filter(CT, 1.) < ndimage.median_filter(q(CT), 15) / 255. - .05
+    out = []
+    for _ in range(rounds):
+        c = cov()
+        around = ndimage.median_filter(q(c), 15) / 255.
+        sus = (around - c > lift) & region & ~drawn_light
+        comp, n = ndimage.label(sus, np.ones((3, 3)))
+        items = []
+        for i, sl in enumerate(ndimage.find_objects(comp)):
+            m = comp[sl] == i + 1
+            ys, xs = np.nonzero(m)
+            if len(xs) > max_px:
+                continue
+            P = np.column_stack([xs + sl[1].start, ys + sl[0].start]).astype(float)
+            cen = P.mean(0)
+            iy, ix = int(cen[1]), int(cen[0])
+            t = np.array([flow[0][iy, ix], flow[1][iy, ix]])
+            if len(xs) >= 6:                           # a slit is closed along its own length
+                ev, evec = np.linalg.eigh(np.cov((P - cen).T) + np.eye(2) * .05)
+                if ev[1] > 3 * ev[0]:
+                    t = evec[:, 1]
+            a = (P - cen) @ t
+            b = (P - cen) @ np.array([-t[1], t[0]])
+            lo, hi = a.min() - 2.5, a.max() + 2.5
+            pts = cen + t * np.linspace(lo, hi, max(3, int(hi - lo) + 1))[:, None]
+            gap = float((around[sl][m] - c[sl][m]).mean())
+            cm = float(c[sl][m].mean())
+            pr = float(np.clip((gap + .02) / (1 - cm + .03) / soft, .2, 1.))
+            items.append((cen, pts, float(np.clip((b.max() - b.min()) / 2 + .8, .9, 3.)), pr))
+        if not items:
+            break
+        items.sort(key=lambda it: (int(it[0][0] // 90), it[0][1] if int(it[0][0] // 90) % 2 == 0 else -it[0][1]))
+        for _, pts, R, pr in items:
+            out.append(lay(pencil(pts, np.full(len(pts), pr), R, rng, grade, .15, 1., clip=clip, press=(.7, .6),
+                                  focal=focal)))
+    return out
+
+
+def scrub(mask, rng, tip, *, R, length, flow, opacity, step=None, clip=None, medium='stump', excess=None, spread=None,
+          cross=None):
     """Blending stump / tissue / kneaded eraser: overlapping short strokes along the form, row after row. With
     excess (a map of how much too dark the sheet is), an eraser presses in proportion and skips where there is none."""
     if mask.sum() < 40:
@@ -510,7 +578,7 @@ def scrub(mask, rng, tip, *, R, length, flow, opacity, step=None, clip=None, med
         else:
             op = opacity
         out.append(lay(stroke(p[::2] if len(p) > 6 else p, R * rng.uniform(.85, 1.15), medium, rng, opacity=op, clip=clip,
-                              press=(.6, .4), pp=pp, spread=spread, tremor=.05)))
+                              press=(.6, .4), pp=pp, spread=spread, cross=cross, tremor=.05)))
     return out
 
 
@@ -724,6 +792,12 @@ def plan_sketch(target_path, sketch_path, areas_path, out, focus, eyes, signatur
     for e in FEATURES:
         feats |= ellipse_mask(e, 1.35)
     feats &= skin | ndimage.binary_dilation(skin, iterations=3)
+    hairlike = hair | (ndimage.binary_dilation(hair, iterations=10) & skin & (B(1.5) > .55)
+                       & ~ndimage.binary_dilation(feats, iterations=6))
+    hairlike = ndimage.binary_opening(ndimage.binary_closing(hairlike, iterations=2), iterations=1) | hair
+    d = ndimage.distance_transform_edt(~hairlike)
+    media.CLIPS['hairlike'] = np.clip(1 - (d - 4.) / 3., 0, 1).astype(np.float32)
+    Image.fromarray((media.CLIPS['hairlike'] * 255).astype(np.uint8)).save(out / 'clip-hairlike.png')
     SURF = surf = media.PaperSurface(ground)
     flow_hair = strand_flow(vt)
     flow_form = paint.orientation(ndimage.gaussian_filter(vt, 3), 10., rng, default=-52.)
@@ -763,14 +837,20 @@ def plan_sketch(target_path, sketch_path, areas_path, out, focus, eyes, signatur
     # ---- 铺大关系: the whole sheet, lightly, with few broad strokes
     # the hair is one even grey mass first (side of a soft lead, stroke lapping stroke, then the pinholes closed):
     # strands drawn over it later sit on grey, not on white paper
-    mass = np.minimum(.6, .7 * B(13))
+    mass = np.where(ndimage.binary_erosion(hair, iterations=3), np.maximum(np.minimum(.6, .7 * B(13)), .24),
+                    np.minimum(.6, .7 * B(13)))
     side = dict(grade='4B', clip='hair', side=True, section=260., pmin=.05, pmax=.75)
-    run('hair', '铺大关系', strands(mass, hair, flow_hair, rng, tip(), R=10., spacing=11., length=(110, 360), smooth=70.,
-                                gain=.85, bridge=60., min_len=50., **side), 7.5)
-    run('hair', '铺大关系', strands(mass, hair, flow_hair, rng, tip(), R=8., spacing=8.5, length=(60, 280), smooth=50.,
+    run('hair', '铺大关系', strands(mass, hair, flow_hair, rng, tip(), R=14., spacing=11., length=(110, 360), smooth=70.,
+                                gain=.8, bridge=60., min_len=50., **side), 7.5)
+    run('hair', '铺大关系', strands(mass, hair, flow_hair, rng, tip(), R=10., spacing=8., length=(60, 280), smooth=50.,
                                 gain=.9, thr=.05, sigma=3., bridge=40., min_len=40., **side), 0.)
-    run('hair', '铺大关系', strands(mass, hair, flow_hair, rng, tip(), R=5.5, spacing=5.5, length=(16, 140), smooth=20.,
-                                gain=.55, thr=.2, sigma=1.5, grow=2, bridge=20., min_len=16., **dict(side, pmax=.45)), 0.)
+    # the lay-in is closed before the hand leaves it: no pinholes, no slits between strokes, the edge run to
+    run('hair', '铺大关系', glaze(mass - .02, hair, flow_hair, rng, tip(), grade='4B', R=8., floor_c=9, thr=.11, clip='hair',
+                              min_len=18., length=(18, 260)), 0.)
+    # ... and rubbed once with a tissue along the flow: one even grey, soft streaks, nothing left open
+    run('hair', '铺大关系', scrub(hair, rng, tip(), R=34., length=(260, 420), flow=flow_hair, opacity=.8, clip='hair',
+                              step=92., spread=.1, cross=3.), 0.)
+    run('hair', '铺大关系', close_spots(hair, flow_hair, rng, tip(), grade='4B', clip='hair', rounds=1), 0.)
     block = U(5, .72)
     set_cap(B(2.2))
     calm = skin & ~ndimage.binary_dilation(feats, iterations=3)       # the big stump stays off the features
@@ -796,9 +876,15 @@ def plan_sketch(target_path, sketch_path, areas_path, out, focus, eyes, signatur
     # the hair's first sharp layer runs over its shine (strand after strand, the lights are not drawn around): the
     # eraser pulls them back out in 提亮, the way it is done on paper
     over = np.maximum(.88 * B(5.), .85 * B(26.))
-    run('deep-hair', '深入', strands(over, hair, flow_hair, rng, tip(), grade='4B', R=2.2, spacing=4.5,
-                                   length=(70, 300), smooth=9., clip='hair', section=200., pmin=.08, bridge=40.,
+    run('deep-hair', '深入', strands(over, hairlike, flow_hair, rng, tip(), grade='4B', R=2.4, spacing=4.3,
+                                   length=(70, 300), smooth=9., clip='hairlike', section=200., pmin=.08, bridge=40.,
                                    min_len=24.), 8.5)
+    # strands leave slits of the grey underneath: the side of the lead over them, in the same step
+    # strands leave slits of the grey underneath: the side of the lead over them, then the last few touched in
+    run('deep-hair', '深入', glaze(closing_goal(.94 * over), hairlike, flow_hair, rng, tip(), grade='4B', R=6., floor_c=5,
+                                 thr=.08, clip='hairlike', min_len=20.), 0.)
+    run('deep-hair', '深入', close_spots(hairlike, flow_hair, rng, tip(), grade='4B', clip='hairlike', lift=.1,
+                                       rounds=1), 0.)
     # skin: light, close, soft. Hard lead, a little pressure, lines nearly touching, layer over layer at a new
     # angle, the stump once in between: tone first, hatching second
     soft = dict(grade='HB', clip='skin', pmin=.05, gain=.9)
@@ -831,14 +917,15 @@ def plan_sketch(target_path, sketch_path, areas_path, out, focus, eyes, signatur
     run('deep-rest', '深入', hatch(U(3., 1.), bg, rng, tip(), grade='HB', R=1.1, spacing=4.6, angle=STEEP, smooth=14.,
                                  clip='bg', patch=(100, 150)), 0.)
     set_cap(None)
-    run('deep-hair2', '深入', strands(np.maximum(B(1.4), .9 * over), hair, flow_hair, rng, tip(), grade='6B', R=1.9,
-                                    spacing=3.7, length=(60, 300), smooth=6., clip='hair', section=200., pmin=.1, gain=1.,
+    deep = np.maximum(B(1.4), .9 * over)
+    run('deep-hair2', '深入', strands(deep, hairlike, flow_hair, rng, tip(), grade='6B', R=2., spacing=3.8,
+                                    length=(60, 300), smooth=6., clip='hairlike', section=200., pmin=.1, gain=1.,
                                     bridge=30., min_len=24., sigma=2.), 9.)
-    # paper still showing between the locks along the fringe: strands laid exactly there
-    fringe = hair & ndimage.binary_dilation(skin, iterations=18)
-    run('deep-hair2', '深入', strands(B(.8), fringe, flow_hair, rng, tip(), grade='4B', R=1.15, spacing=2.4, length=(6, 120),
-                                    sigma=1., smooth=3., clip='hair', thr=.13, grow=1, min_len=8., gain=.9, bridge=6.,
-                                    section=120.), 0.)
+
+    run('deep-hair2', '深入', glaze(closing_goal(.96 * deep), hairlike, flow_hair, rng, tip(), grade='6B', R=4.5, floor_c=5,
+                                  thr=.07, clip='hairlike', pmax=.8, min_len=14.), 0.)
+    run('deep-hair2', '深入', close_spots(hairlike, flow_hair, rng, tip(), grade='6B', clip='hairlike', lift=.1,
+                                        rounds=1), 0.)
 
     # ---- 刻画五官: a sharp pencil, lines along the form, each placed exactly; the eyes last and at life pace
     final = B(.35)
@@ -852,7 +939,7 @@ def plan_sketch(target_path, sketch_path, areas_path, out, focus, eyes, signatur
     polish += draw_lines(edge_lines(feats, rng, .8), ndimage.maximum_filter(B(.4), 3), rng, tip(), grade='2B', gain=.85,
                          smooth=2.)
     for grade, sp, thr_ in (('2B', 1.3, .025), ('4B', 1.2, .03), ('6B', 1.15, .045)):
-        polish += strands(final, feats, flow_fine, rng, tip(), grade=grade, R=.56, spacing=sp, length=(4, 50),
+        polish += strands(final, feats, flow_fine, rng, tip(), grade=grade, R=.64, spacing=sp, length=(4, 50),
                           sigma=.55, smooth=1., gain=.97, thr=thr_, down=False, section=34., min_len=4., step=1.,
                           focal=True, grow=1, bridge=2.)
     # the darks (iris, pupil, nostril, the corners of the mouth) are packed solid with short strokes across the
@@ -906,24 +993,28 @@ def plan_sketch(target_path, sketch_path, areas_path, out, focus, eyes, signatur
     # ---- 提亮: the hair's shine comes back out of the mass: the kneaded eraser first, broad along the flow, then
     # a few long strands with the eraser pen
     excess_h = ndimage.gaussian_filter(cov() - B(3.), 5.)
-    run('lift', '提亮', scrub(hair & (excess_h > .05), rng, tip(), R=9., length=(60, 150), flow=flow_hair, opacity=.5,
-                            clip='hair', step=17., medium='eraser', excess=excess_h), 4.5)
-    run('lift', '提亮', strands(B(1.2), hair, flow_hair, rng, tip(), R=1.5, spacing=5., length=(50, 260), smooth=8.,
-                              eraser=True, thr=.06, opacity=.8, clip='hair', gain=1., sigma=2., min_len=36.,
-                              bridge=30.), 0.)
+    run('lift', '提亮', scrub(hair & (excess_h > .06), rng, tip(), R=15., length=(90, 200), flow=flow_hair, opacity=.5,
+                            clip='hair', step=30., medium='eraser', excess=excess_h), 4.5)
+    run('lift', '提亮', strands(B(2.5), hair, flow_hair, rng, tip(), R=3.4, spacing=9., length=(80, 300), smooth=14.,
+                              eraser=True, thr=.07, opacity=.55, clip='hair', gain=1., sigma=3.5, min_len=70.,
+                              bridge=40.), 0.)
     excess = ndimage.gaussian_filter(cov() - B(1.5), 2.)
-    run('lift', '提亮', scrub(skin & (excess > .015), rng, tip(), R=6., length=(10, 24), flow=flow_form, opacity=.45,
-                            clip='skin', step=8., medium='eraser', excess=excess), 0.)
+    run('lift', '提亮', scrub(skin & (excess > .03), rng, tip(), R=9., length=(14, 30), flow=flow_form, opacity=.45,
+                            clip='skin', step=15., medium='eraser', excess=excess), 0.)
 
     # ---- 收尾: one more close look at every area; the deepest darks go in last
-    run('finish', '收尾', strands(B(1.), hair, flow_hair, rng, tip(), grade='6B', R=1.4, spacing=3., length=(40, 260),
-                                smooth=4., clip='hair', gain=.95, thr=.1, section=200., bridge=24., min_len=30., sigma=1.6), 6.5)
+    run('finish', '收尾', strands(B(1.), hairlike, flow_hair, rng, tip(), grade='6B', R=1.5, spacing=2.8, length=(40, 260),
+                                smooth=4., clip='hairlike', gain=.95, thr=.1, section=200., bridge=24., min_len=30.,
+                                sigma=1.6), 6.5)
+    run('finish', '收尾', glaze(closing_goal(B(2.) - .03), hairlike, flow_hair, rng, tip(), grade='6B', R=3., floor_c=3,
+                              thr=.06, clip='hairlike', pmax=.8, min_len=10.), 0.)
     set_cap(B(.6) + .02)
     run('finish', '收尾', hatch(B(1.2), clothes, rng, tip(), grade='2B', R=.95, spacing=2.8, angle=FLICK, smooth=5.,
                               clip='clothes', patch=(70, 100), thr=.08, min_len=14., bridge=8.), 0.)
     run('finish', '收尾', hatch(B(2.), bg, rng, tip(), grade='2B', R=1., spacing=3.6, angle=FLICK, smooth=9.,
                               clip='bg', patch=(90, 130), thr=.08, min_len=16., bridge=8.), 0.)
     set_cap(None)
+    run('finish', '收尾', close_spots(hairlike, flow_hair, rng, tip(), grade='6B', clip='hairlike'), 0.)
     run('finish', '收尾', touch_up(B(.6), ndimage.binary_dilation(skin, iterations=12), rng, tip(), thr=.16, min_px=12), 0.)
     if signature:
         text, box = signature
