@@ -90,13 +90,22 @@ def patch_of(f, alpha, colour, layer=None):
                 path=f['path'].astype(np.float32), s=f['s'].astype(np.float32), layer=layer)
 
 
-def label_clip(name, k, box):
+def label_clip(name, k, box, grow=0):
     """Soft coverage of shape k of a label map inside box: anti-aliased, and grown half a pixel so two shapes painted
-    side by side leave no light seam between them."""
+    side by side leave no light seam between them. With grow, the shape also reaches that many pixels into shapes
+    with a higher number (numbers are the painting order: what is painted later goes over the overlap, so under the
+    line art and at every border the colours meet with no paper between them)."""
     y0, y1, x0, x1 = box
-    ya, yb, xa, xb = max(0, y0 - 2), min(H, y1 + 2), max(0, x0 - 2), min(W, x1 + 2)
-    m = ndimage.gaussian_filter((LABELS[name][ya:yb, xa:xb] == k).astype(np.float32), .7)
-    return np.clip(m * 2., 0, 1), ya, xa
+    p = 2 + grow
+    ya, yb, xa, xb = max(0, y0 - p), min(H, y1 + p), max(0, x0 - p), min(W, x1 + p)
+    lab = LABELS[name][ya:yb, xa:xb]
+    own = lab == k
+    if grow:
+        own = own | (ndimage.binary_dilation(own, iterations=grow) & (lab > k))
+    m = np.clip(ndimage.gaussian_filter(own.astype(np.float32), .7) * 2., 0, 1)
+    if grow:
+        m[(lab < k) & (lab > 0)] = 0.      # nothing of it on what was painted before: no fringe of this colour left there
+    return m, ya, xa
 
 
 def clipped(stroke, f, a):
@@ -105,7 +114,7 @@ def clipped(stroke, f, a):
         return a
     if isinstance(c, str):
         return a * CLIPS[c][f['gy'], f['gx']]
-    m, ya, xa = label_clip(c[0], c[1], f['box'])
+    m, ya, xa = label_clip(c[0], c[1], f['box'], c[2] if len(c) > 2 else 0)
     return a * m[f['gy'] - ya, f['gx'] - xa]
 
 
