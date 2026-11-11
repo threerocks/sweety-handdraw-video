@@ -128,6 +128,11 @@ MEDIA = {
     'digital':  dict(opacity=.93, load_len=1e9, dry=0., pickup=.1, colvar=.006, impasto=.05, cap=.5, lanes=.12, square=True),
     'scumble':  dict(opacity=.85, load_len=5., dry=1.5, pickup=.08, colvar=.02, impasto=.12, cap=.7, lanes=.9),   # dry brush
     'blend':    dict(opacity=.6, load_len=1e9, dry=0., pickup=1., colvar=0., impasto=.08, cap=.9, lanes=.25),
+    # v5 (forms.py): a flat hog-bristle brush worked by hand: the load runs out along a long stroke, wet paint is dragged
+    'bristle':  dict(opacity=.97, load_len=15., dry=.85, pickup=.26, colvar=.02, impasto=1.0, cap=.5, lanes=.85),
+    'bristle_flat': dict(opacity=.97, load_len=22., dry=.5, pickup=.16, colvar=.012, impasto=.9, cap=.35, lanes=.6, square=True),
+    'bristle_soft': dict(opacity=.96, load_len=17., dry=.6, pickup=.3, colvar=.016, impasto=.8, cap=.75, lanes=.7),
+    'drag':     dict(opacity=.8, load_len=9., dry=1.3, pickup=.4, colvar=.02, impasto=.4, cap=.6, lanes=1.0, square=True),
     'sign':     dict(opacity=.95, load_len=1e9, dry=.3, pickup=.05, colvar=0., impasto=.8, cap=.7, lanes=.3),
 }
 
@@ -166,7 +171,7 @@ def geometry(stroke):
     nrm = np.stack([-tan[:, 1], tan[:, 0]], 1)
     if stroke.get('wobble', 1) and L > 3 * R:   # a hand never pulls a perfectly smooth line
         k = np.interp(s, np.linspace(0, L, 6), rng.standard_normal(6))
-        pts = pts + nrm * (k * R * .05)[:, None]
+        pts = pts + nrm * (k * R * .05 * float(stroke.get('wobble', 1)))[:, None]
     press = stroke.get('press', (.55, .35))
     land = min(.9 * R, .3 * L + 1)
     lift = min(1.4 * R, .45 * L + 1)
@@ -225,7 +230,7 @@ def render(stroke, canvas, height, thick, tooth, apply=True):
     lanes = np.interp(b * (nb + 1), np.arange(nb + 2), lane_v)
     streak = np.interp(b * (3 * nb + 1), np.arange(3 * nb + 2), streak_v)
     bristle = 1 - m['lanes'] * (1 - .5 * soft) * (1 - (.62 * lanes + .38 * (.7 + .3 * streak)))
-    load = np.exp(-np.clip(ss, 0, None) / (m['load_len'] * R * stroke.get('load', 1.)))
+    load = stroke.get('load0', 1.) * np.exp(-np.clip(ss, 0, None) / (m['load_len'] * R * stroke.get('load', 1.)))
     lift = np.clip(wpx / R, 0, 1)                    # a lifting brush lays less paint: feathered, dry ends
     amount = bristle * load * (1 - .22 * np.abs(u) ** 4) * (.5 + .5 * lift)
     gy, gx = (flat // (x1 - x0)) + y0, (flat % (x1 - x0)) + x0
@@ -257,12 +262,14 @@ def render(stroke, canvas, height, thick, tooth, apply=True):
     pick = pick * emw[np.clip(idx[inside], 0, n - 1)]
     paint = (1 - pick)[:, None] * colour + pick[:, None] * ema[np.clip(idx[inside], 0, n - 1)]
     paint = paint + ((streak - .5) * 2 * m['colvar'])[:, None] * np.array([1., .96, .9])
+    if stroke.get('tone2'):                          # v5: two neighbouring tones on one brush, side by side
+        paint = paint + u[:, None] * np.asarray(stroke['tone2'], float)
     paint = np.clip(paint, 0, 1)
     # impasto: ridges at bristle lanes and edges, paint piles where the brush lifts while still loaded
     ridge = np.exp(-((np.abs(u) - .86) / .1) ** 2)
     pile = .45 * load * np.exp(-((ss - L) / (.45 * R)) ** 2)
     body = .3 + 1.0 * value                           # thick lights, thin darks
-    hgt = alpha * m['impasto'] * body * (.55 + .9 * (streak - .5) + .4 * (lanes - .86) / .14 * .3 + m.get('ridge', .25) * ridge + pile) * min(1., R / 12.) ** .5
+    hgt = alpha * m['impasto'] * body * (.55 + .9 * (streak - .5) + .4 * (lanes - .86) / .14 * .3 + m.get('ridge', .25) * ridge + pile) * min(1., R / 12.) ** .5 * stroke.get('body', 1.)
     patch = dict(box=(y0, y1, x0, x1), gy=gy.astype(np.int32), gx=gx.astype(np.int32), ss=ss.astype(np.float32), alpha=alpha.astype(np.float32),
                  paint=paint.astype(np.float32), hgt=hgt.astype(np.float32), L=float(L), wpx=wpx.astype(np.float32),
                  path=pts.astype(np.float32), s=s.astype(np.float32))
@@ -348,6 +355,8 @@ def plan_layer(spec, ref_rgb, canvas, focus, rng, start_tip):
     diff = np.linalg.norm(ref_lab - canvas_lab, axis=-1)
     if spec.get('darken'):         # stubble and the like are darker than the skin around them: only darker paint goes on
         diff = np.where(ref_lab[..., 0] < canvas_lab[..., 0] - 2, diff, 0.)
+    if spec.get('lighten'):        # v5 提亮: only paint lighter than what is there (hair sheen, the lights of the face)
+        diff = np.where(ref_lab[..., 0] > canvas_lab[..., 0] + spec['lighten'], diff, 0.)
     thresh = spec['T'] / np.clip(focus, .05, 1) ** spec['gamma']
     skin = skin_mask(ref_rgb) if spec.get('skin') else None
     if skin is not None:           # the face converges further on the model than the rest
@@ -921,7 +930,7 @@ if __name__ == '__main__':
     ap.add_argument('signature', nargs='?', default='-', help='JSON ["text", [x, y, w, h]] or -')
     ap.add_argument('eyes', nargs='?', default=None, help='JSON [[cx, cy, rx, ry], ...]')
     ap.add_argument('--photo', help='photo pinned beside the canvas (default: the subject)')
-    ap.add_argument('--style', choices=['v1', 'v2', 'v4'], default='v1')
+    ap.add_argument('--style', choices=['v1', 'v2', 'v4', 'v5'], default='v1')
     ap.add_argument('--crop-top', type=float, default=.35, help='canvas window position in a taller picture (0 top, 1 bottom)')
     ap.add_argument('--face', help='JSON [cx, cy, rx, ry] of the face (v2 texture pass leaves it alone)')
     ap.add_argument('--texture', help='JSON [cx, cy, rx, ry] of skin that keeps a fine texture, e.g. stubble (v2 干擦 pass)')
@@ -936,7 +945,18 @@ if __name__ == '__main__':
         REGIONS['figure'] = tuple(json.loads(a.figure))
     if a.texture:
         REGIONS['texture'] = tuple(json.loads(a.texture))
-    if a.style == 'v4':
+    if a.style == 'v5':
+        import paint as engine
+        import planes
+        import forms
+        engine.REGIONS.update(REGIONS)
+        engine.CROP_TOP = CROP_TOP
+        planes.AREA_MAP = a.areas
+        forms.PRESET = a.preset
+        forms.plan_v5(a.subject, None if a.sketch == '-' else a.sketch, a.out, json.loads(a.focus),
+                      None if a.signature == '-' else json.loads(a.signature), json.loads(a.eyes) if a.eyes else None,
+                      photo_path=a.photo)
+    elif a.style == 'v4':
         import paint as engine          # planes.py imports this file as the module 'paint': hand it the settings
         import planes
         engine.REGIONS.update(REGIONS)

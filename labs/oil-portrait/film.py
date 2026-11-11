@@ -577,7 +577,7 @@ def build(plan, palette):
             if need > feature_cap:
                 for e in others:
                     e['slow'] = base * need / feature_cap
-        if KIND[0] != 'oil':
+        if KIND[0] != 'oil' or ps.get('group'):       # oil: only passes the plan marks (v5 strands, edges...)
             evs = group_events(evs)
         timeline.append(evs)
 
