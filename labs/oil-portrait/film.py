@@ -125,16 +125,21 @@ def floor(e):
     if e['kind'] == 'mix' and e.get('trip'):
         return 1.875 * d / (HAND_PX * FPS) * e['real'] / max(1e-6, e['go'])   # the outbound move gets go/real of it
     if e['kind'] == 'stroke' and KIND[0] == 'sketch':
-        # a sketch is thousands of short marks: however fast the lapse, the pencil must be seen making them. One frame
-        # shows at most SKETCH_MARKS strokes of one hatching motion, and a long stroke crosses at most SKETCH_PX
-        return max(e.get('floorL', e['L']) / SKETCH_PX, len(e.get('group', (0,))) / SKETCH_MARKS) / FPS
+        # a sketch is thousands of short marks: however fast the lapse, the pencil must be seen making them. In one
+        # frame a hatching motion advances at most SKETCH_ADV px sideways, and a long stroke crosses at most SKETCH_PX
+        if e['st']['medium'] == 'stump':             # a stump is rubbed slowly: its whole path, back and forth
+            return e['L'] / STUMP_PX / FPS
+        adv = sum(g[0].get('adv', SKETCH_ADV / SKETCH_MARKS) for g in e['group']) if 'group' in e else 0.
+        return max(e.get('floorL', e['L']) / SKETCH_PX, adv / SKETCH_ADV) / FPS
     if e['kind'] == 'stroke' and e.get('floorL', e['L']) > 200:
         return 1.875 * e.get('floorL', e['L']) / (STROKE_PX * FPS)
     return 0.
 
 
 SKETCH_PX = 340.        # sketch: the longest stroke of a motion travels at most this far in one frame
-SKETCH_MARKS = 26.      # sketch: strokes of one hatching motion laid in one frame at most
+SKETCH_MARKS = 26.      # sketch: strokes of one hatching motion laid in one frame at most, when a stroke does not say
+SKETCH_ADV = 75.        # how far its hatching advances (st['adv'], the line spacing): then this many px sideways a frame
+STUMP_PX = 120.         # sketch: the blending stump travels at most this far in one frame
 # sketch: the hand puts one tool down and picks up another at the tools laid out below the board (frame px), and is
 # drawn holding it (a sidecar-calibrated asset each); a stroke's medium says which tool lays it
 TOOL_OF = {'graphite': 'pencil', 'stump': 'stump', 'eraser': 'eraser'}

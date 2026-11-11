@@ -8,6 +8,8 @@ an illustrator paints under the line art with a clipping mask).
 A stroke uses the oil engine's geometry (paint.geometry: centreline, taper, wobble) and its patch format (box, gy,
 gx, ss, alpha, paint, wpx), so film.py reveals it by arc length exactly as it does an oil stroke.
 """
+import math
+
 import numpy as np
 from scipy import ndimage
 from scipy.spatial import cKDTree
@@ -134,7 +136,7 @@ def graphite(stroke, canvas):
     p = pressure_along(stroke, f)
     soft, ceil = GRADES[stroke.get('grade', 'HB')]
     g = GRAIN[f['gy'], f['gx']]
-    grain = np.clip(1 + (.55 if side else .5) * (g - .5) * 2 * (1 - .85 * p), .1, 2.)
+    grain = np.clip(1 + (.3 if side else .45) * (g - .5) * 2 * (1 - .85 * p), .1, 2.)
     d = np.clip(soft * p * grain, 0, 1) * clipped(stroke, f, prof)
     ground = PAPER[f['gy'], f['gx']]
     c = coverage(canvas[f['gy'], f['gx']], ground)
@@ -149,11 +151,26 @@ def stump(stroke, canvas):
     if f is None:
         return None
     y0, y1, x0, x1 = f['box']
-    sig = max(1.2, stroke['R'] * stroke.get('spread', .5))
-    pad = int(3 * sig)
+    reach = max(2., stroke['R'] * stroke.get('spread', .5))     # how far graphite is dragged along the stroke
+    pad = int(reach * 2) + 3
     ya, yb, xa, xb = max(0, y0 - pad), min(canvas.shape[0], y1 + pad), max(0, x0 - pad), min(canvas.shape[1], x1 + pad)
-    blur = ndimage.gaussian_filter(canvas[ya:yb, xa:xb], (sig, sig, 0))
-    smeared = blur[f["gy"] - ya, f["gx"] - xa] * .997
+    box = ndimage.gaussian_filter(canvas[ya:yb, xa:xb], (.8, .8, 0))
+    # a stump drags graphite the way it moves: the tone is averaged along the stroke far more than across it, so
+    # a rubbed passage keeps soft streaks in the stroke's direction instead of going out of focus
+    tan = np.gradient(f['path'], axis=0)
+    tan /= np.linalg.norm(tan, axis=1, keepdims=True) + 1e-9
+    u = np.clip(f['ss'], 0, f['L'])
+    tx, ty = np.interp(u, f['s'], tan[:, 0]), np.interp(u, f['s'], tan[:, 1])
+    smeared = np.zeros((len(u), 3))
+    wsum = 0.
+    for o in np.linspace(-2, 2, 9):
+        w = math.exp(-.5 * o * o)
+        yy = np.clip(f['gy'] + ty * o * reach - ya, 0, yb - ya - 1)
+        xx = np.clip(f['gx'] + tx * o * reach - xa, 0, xb - xa - 1)
+        for c in range(3):
+            smeared[:, c] += w * ndimage.map_coordinates(box[..., c], [yy, xx], order=1)
+        wsum += w
+    smeared = smeared / wsum * .997
     prof = np.clip(1 - f['rr'] ** 2, 0, 1) ** .8
     a = clipped(stroke, f, prof * stroke.get('opacity', .7))
     return patch_of(f, a, smeared)
